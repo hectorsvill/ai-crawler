@@ -13,6 +13,11 @@ source .venv/bin/activate
 
 Python version: 3.12. The venv is at `ai-crawler/.venv/`.
 
+## Documentation
+
+- **Full usage guide**: [`docs/usage.md`](docs/usage.md) — CLI reference, workflow modes, config, agents, Python API, troubleshooting
+- **Real-world examples**: [`use_cases/`](use_cases/) — runnable scripts for HackerNews, Wikipedia, GitHub Trending
+
 ## Common Commands
 
 ```bash
@@ -39,6 +44,11 @@ Python version: 3.12. The venv is at `ai-crawler/.venv/`.
 
 # Run a single test file
 .venv/bin/python -m pytest tests/test_url_utils.py -v
+
+# Real-world use cases
+.venv/bin/python use_cases/hackernews_digest.py
+.venv/bin/python use_cases/wikipedia_research.py "machine learning" --pages 5
+.venv/bin/python use_cases/github_trending.py --language python --period weekly
 ```
 
 ## Git Workflow
@@ -94,19 +104,49 @@ All inter-component data uses these — never raw dicts:
 - `URLItem` — queue entry
 - `SessionStats` — live stats for progress display
 
+### Public Python API
+
+High-level classes for use in scripts and tests (no Ollama required for construction):
+
+| Class | Module | Purpose |
+|-------|--------|---------|
+| `LLMClient` | `llm/client.py` | Simple `generate()` / `generate_json()` wrapper |
+| `CrawlEngine` | `crawler/engine.py` | Async `fetch()` / `is_allowed()` / `close()` |
+| `WorkflowRouter` | `workflows/router.py` | `select(goal)` → `RouterDecision` |
+| `Settings` / `AppConfig` | `config.py` | Config object (`Settings` is an alias) |
+
+```python
+from llm.client import LLMClient
+from crawler.engine import CrawlEngine
+from workflows.router import WorkflowRouter
+```
+
 ### LLM client (`llm/client.py`)
 
 - `OllamaClient.structured_call()` injects the Pydantic model's JSON schema into the system prompt and validates the response.
-- Responses are cached in-memory keyed by `(content_hash, goal, model)` — avoid passing empty `content_hash` or caching won't work.
+- Responses are cached in-memory keyed by `(content_hash:schema_name, goal, model)` — avoid passing empty `content_hash` or caching won't work. The schema name is included to prevent navigator/extractor cache collisions.
 - Content is chunked via `chunk_text()` before sending; `MAX_CONTENT_TOKENS = 7168` (8192 context minus 1024 overhead).
 - Retries use exponential backoff; if the extractor model fails all retries it falls back to the navigator model.
+- `token_usage` (module-level singleton) tracks prompt/completion tokens per model; printed in `utils/progress.py` summary.
 
 ### Configuration
 
 Config merges in this order (later wins): `default_config.yaml` → user YAML (`--config`) → `CRAWLER_*` env vars (e.g. `CRAWLER_OLLAMA__BASE_URL`).
+
+### Use cases (`use_cases/`)
+
+Runnable scripts that demonstrate real crawl workflows:
+
+| Script | What it does |
+|--------|-------------|
+| `hackernews_digest.py` | Crawls HN front page → Rich table + `hn_digest.json` |
+| `wikipedia_research.py <topic>` | Multi-page Wikipedia research → `<topic>_research.json` |
+| `github_trending.py` | GitHub Trending (Playwright) → Rich table + `github_trending.json` |
 
 ### Important version notes
 
 - **LangGraph 1.x**: checkpointer is passed to `graph.compile(checkpointer=...)`, not via a `with_checkpointer()` method.
 - **CrewAI 1.x**: `llm=` on `Agent` must be a `crewai.LLM` object, not a plain dict.
 - **tiktoken** uses `cl100k_base` as an approximation for all Ollama models.
+- **trafilatura**: use `include_formatting=True` (not `include_headings=True` which doesn't exist in the installed version).
+- **Domain filter**: `*.example.com` patterns also match the bare `example.com` parent domain via `_domain_matches()` in `crawler/respectful.py`.
