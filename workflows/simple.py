@@ -159,9 +159,9 @@ async def run_simple(
             visited_urls.append(item.url)
             stats.pages_crawled += 1
 
-            # Extract if relevant enough
-            # Use extract_chunks for long pages so data in later chunks isn't lost
-            if decision.relevance_score >= 0.3:
+            # Extract if relevant enough (≥ 0.2 avoids clearly-irrelevant pages
+            # while still capturing borderline pages the Navigator is uncertain about)
+            if decision.relevance_score >= 0.2:
                 try:
                     extraction = await extractor.extract_chunks(
                         url=item.url,

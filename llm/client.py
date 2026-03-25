@@ -190,6 +190,9 @@ class OllamaClient:
         """
         backoff = 2.0 ** attempt
 
+        # Build prompt string for token accounting
+        _prompt_str = " ".join(m.get("content", "") for m in messages)
+
         try:
             if HAS_OLLAMA:
                 client = _ollama.AsyncClient(host=self.base_url)
@@ -197,11 +200,14 @@ class OllamaClient:
                     client.chat(model=model, messages=messages),
                     timeout=self.timeout,
                 )
-                return response["message"]["content"]
+                raw = response["message"]["content"]
             else:
-                return await _call_ollama_http(self.base_url, model, messages, self.timeout)
+                raw = await _call_ollama_http(self.base_url, model, messages, self.timeout)
 
-        except (asyncio.TimeoutError, Exception) as exc:
+            token_usage.record(model, _prompt_str, raw)
+            return raw
+
+        except (asyncio.TimeoutError, Exception) as exc:  # noqa: BLE001
             logger.warning("LLM call failed (attempt %d): %s", attempt + 1, exc)
 
             if attempt < self.max_retries - 1:
@@ -240,11 +246,16 @@ class OllamaClient:
             f"Response JSON schema:\n```json\n{schema_str}\n```"
         )
 
+        # Include the schema name in the cache key so navigator and extractor
+        # calls for the same page don't collide when using the same model.
+        schema_name = response_schema.__name__
+        effective_cache_key = f"{cache_key}:{schema_name}" if cache_key else None
+
         # Check cache
-        if cache_key:
-            cached = _cache.get(cache_key, goal, model)
+        if effective_cache_key:
+            cached = _cache.get(effective_cache_key, goal, model)
             if cached:
-                logger.debug("LLM cache hit for %s", cache_key[:16])
+                logger.debug("LLM cache hit for %s [%s]", cache_key[:16], schema_name)
                 return _parse_llm_response(cached, response_schema)
 
         # Chunk content if too long
@@ -260,8 +271,8 @@ class OllamaClient:
 
         raw = await self.raw_call(model, messages)
 
-        if cache_key:
-            _cache.set(cache_key, goal, model, raw)
+        if effective_cache_key:
+            _cache.set(effective_cache_key, goal, model, raw)
 
         return _parse_llm_response(raw, response_schema)
 
@@ -306,6 +317,187 @@ def _parse_llm_response(raw: str, schema: type[T]) -> T:
     try:
         data = json.loads(text)
         return schema.model_validate(data)
+    except json.JSONDecodeError as json_exc:
+        # Try a lenient fallback: strip trailing commas and common LLM quirks
+        try:
+            import re as _re
+            # Remove trailing commas before } or ]
+            cleaned = _re.sub(r",\s*([}\]])", r"\1", text)
+            data = json.loads(cleaned)
+            logger.debug("JSON recovered after trailing-comma cleanup")
+            return schema.model_validate(data)
+        except Exception:
+            pass
+        logger.error("Failed to parse LLM response: %s\nRaw: %.200s", json_exc, raw)
+        raise ValueError(f"LLM returned unparseable JSON: {json_exc}") from json_exc
     except Exception as exc:
-        logger.error("Failed to parse LLM response: %s\nRaw: %.200s", exc, raw)
+        logger.error("Failed to validate LLM response schema: %s\nRaw: %.200s", exc, raw)
         raise ValueError(f"LLM returned unparseable JSON: {exc}") from exc
+
+
+# ── Token usage tracker ────────────────────────────────────────────────────────
+
+class TokenUsage:
+    """Accumulates token counts across multiple LLM calls."""
+
+    def __init__(self) -> None:
+        self.prompt_tokens: int = 0
+        self.completion_tokens: int = 0
+        self._per_model: dict[str, dict[str, int]] = {}
+
+    def record(self, model: str, prompt: str, completion: str) -> None:
+        pt = count_tokens(prompt)
+        ct = count_tokens(completion)
+        self.prompt_tokens += pt
+        self.completion_tokens += ct
+        bucket = self._per_model.setdefault(model, {"prompt": 0, "completion": 0})
+        bucket["prompt"] += pt
+        bucket["completion"] += ct
+        logger.debug("[tokens] model=%s prompt=%d completion=%d", model, pt, ct)
+
+    def summary(self) -> str:
+        lines = [
+            f"Token usage — prompt: {self.prompt_tokens:,}  "
+            f"completion: {self.completion_tokens:,}  "
+            f"total: {self.prompt_tokens + self.completion_tokens:,}"
+        ]
+        for model, counts in self._per_model.items():
+            lines.append(
+                f"  {model}: prompt={counts['prompt']:,} completion={counts['completion']:,}"
+            )
+        return "\n".join(lines)
+
+
+# Module-level usage tracker (shared across all LLMClient instances)
+token_usage = TokenUsage()
+
+
+# ── Graceful startup check ─────────────────────────────────────────────────────
+
+async def check_ollama_reachable(base_url: str = "http://localhost:11434") -> bool:
+    """
+    Ping Ollama and return True if it responds.
+    Prints a clear actionable error message and returns False otherwise.
+    """
+    try:
+        async with aiohttp.ClientSession() as session:
+            async with session.get(
+                f"{base_url.rstrip('/')}/api/tags",
+                timeout=aiohttp.ClientTimeout(total=5),
+            ) as resp:
+                return resp.status == 200
+    except Exception:
+        print(
+            "\n[ERROR] Cannot reach Ollama at "
+            f"{base_url}\n"
+            "  → Make sure Ollama is installed and running:\n"
+            "      ollama serve\n"
+            "  → Then verify with:\n"
+            "      curl http://localhost:11434/api/tags\n"
+        )
+        return False
+
+
+# ── Friendly high-level client ─────────────────────────────────────────────────
+
+class LLMClient:
+    """
+    Simplified Ollama client for one-off usage without pre-built configs.
+
+    Wraps OllamaClient with convenience methods:
+      - generate(prompt, model)  → plain text
+      - generate_json(prompt, model)  → dict (parsed JSON with retry)
+
+    Token counts for each call are printed and accumulated in token_usage.
+    """
+
+    DEFAULT_MODEL = "qwen2.5:7b"
+    DEFAULT_BASE_URL = "http://localhost:11434"
+
+    def __init__(
+        self,
+        base_url: str = DEFAULT_BASE_URL,
+        default_model: str = DEFAULT_MODEL,
+        timeout: int = 120,
+        max_retries: int = 3,
+    ) -> None:
+        self.default_model = default_model
+
+        class _Cfg:
+            pass
+
+        cfg = _Cfg()
+        cfg.base_url = base_url  # type: ignore[attr-defined]
+        cfg.navigator_model = default_model  # type: ignore[attr-defined]
+        cfg.extractor_model = default_model  # type: ignore[attr-defined]
+        cfg.router_model = default_model  # type: ignore[attr-defined]
+        cfg.timeout = timeout  # type: ignore[attr-defined]
+        cfg.max_retries = max_retries  # type: ignore[attr-defined]
+
+        self._client = OllamaClient(cfg)
+
+    async def generate(self, prompt: str, model: str | None = None) -> str:
+        """Call the LLM and return the raw text response."""
+        model = model or self.default_model
+        messages = [{"role": "user", "content": prompt}]
+        raw = await self._client.raw_call(model, messages)
+        token_usage.record(model, prompt, raw)
+        print(
+            f"[tokens] model={model} "
+            f"prompt≈{count_tokens(prompt)} "
+            f"completion≈{count_tokens(raw)}"
+        )
+        return raw
+
+    async def generate_json(
+        self,
+        prompt: str,
+        model: str | None = None,
+        *,
+        max_attempts: int = 2,
+    ) -> dict:
+        """
+        Call the LLM expecting a JSON object back.
+
+        On first parse failure, retries with a stricter prompt before
+        raising, rather than silently returning malformed data.
+        """
+        model = model or self.default_model
+        system = (
+            "You are a precise JSON assistant. "
+            "Always respond with a single valid JSON object — no prose, no markdown fences."
+        )
+        for attempt in range(max_attempts):
+            user_content = prompt if attempt == 0 else (
+                f"{prompt}\n\nIMPORTANT: Return ONLY raw JSON. No explanations. "
+                "Start your response with {{ and end with }}."
+            )
+            messages = [
+                {"role": "system", "content": system},
+                {"role": "user", "content": user_content},
+            ]
+            raw = await self._client.raw_call(model, messages)
+            token_usage.record(model, user_content, raw)
+            print(
+                f"[tokens] model={model} "
+                f"prompt≈{count_tokens(user_content)} "
+                f"completion≈{count_tokens(raw)}"
+            )
+            # Try to parse
+            try:
+                text = raw.strip()
+                if text.startswith("```"):
+                    lines = text.split("\n")
+                    text = "\n".join(lines[1:-1] if lines[-1].strip() == "```" else lines[1:])
+                start = text.find("{")
+                end = text.rfind("}")
+                if start != -1 and end > start:
+                    return json.loads(text[start : end + 1])
+                return json.loads(text)
+            except Exception as exc:
+                if attempt == max_attempts - 1:
+                    raise ValueError(
+                        f"LLM returned invalid JSON after {max_attempts} attempts: {exc}\nRaw: {raw[:200]}"
+                    ) from exc
+                logger.warning("generate_json attempt %d failed, retrying: %s", attempt + 1, exc)
+        return {}  # unreachable

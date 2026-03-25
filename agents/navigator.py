@@ -53,28 +53,43 @@ class NavigatorAgent:
     """
     LLM-powered agent that decides which links to follow next.
 
-    Designed to minimize token usage by using a small/fast model
-    and concise prompts.
+    Can be instantiated without arguments (creates a default OllamaClient
+    using the default config) or with an explicit OllamaClient for
+    dependency injection.
     """
 
-    def __init__(self, llm: "OllamaClient") -> None:
+    def __init__(self, llm: "OllamaClient | None" = None) -> None:
+        if llm is None:
+            from config import load_config
+            from llm.client import OllamaClient as _OC
+            llm = _OC(load_config().ollama)
         self.llm = llm
 
     async def decide(
         self,
-        url: str,
-        markdown: str,
-        goal: str,
-        links: list[str],
+        url: str = "",
+        markdown: str = "",
+        goal: str = "",
+        links: list[str] | None = None,
         history_summary: str = "",
         content_hash: str = "",
+        *,
+        # Keyword aliases used by the spec validation API
+        page_markdown: str = "",
     ) -> NavigatorDecision:
         """
         Analyze the current page and return a NavigatorDecision.
 
         Falls back to a safe default decision on LLM errors to prevent
         crawl interruption.
+        ``page_markdown`` is an alias for ``markdown`` (spec compatibility).
         """
+        # Resolve keyword alias
+        if page_markdown:
+            markdown = page_markdown
+        if links is None:
+            links = []
+
         # Format links for the prompt (limit to 50 to save tokens)
         links_display = links[:50]
         links_list = "\n".join(f"- {link}" for link in links_display)
@@ -90,6 +105,9 @@ class NavigatorAgent:
         )
 
         try:
+            from llm.client import count_tokens, token_usage
+            _prompt_tokens = count_tokens(NAVIGATOR_SYSTEM_PROMPT + user_content)
+
             decision = await self.llm.structured_call(
                 model=self.llm.navigator_model,
                 system_prompt=NAVIGATOR_SYSTEM_PROMPT,
@@ -98,6 +116,8 @@ class NavigatorAgent:
                 cache_key=content_hash if content_hash else None,
                 goal=goal,
             )
+            logger.debug("[tokens] navigator prompt≈%d", _prompt_tokens)
+
             # Validate and sanitize link URLs
             decision.links_to_follow = _filter_valid_links(
                 decision.links_to_follow, allowed_urls=set(links)

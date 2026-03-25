@@ -98,6 +98,12 @@ async def _run_crawl(
     from workflows.router import select_workflow
 
     config = load_config(config_path)
+
+    # Fail fast with a helpful message if Ollama is unreachable
+    from llm.client import check_ollama_reachable
+    if not await check_ollama_reachable(config.ollama.base_url):
+        raise typer.Exit(1)
+
     await init_db(config.storage.db_path)
 
     console.rule("[bold green]AI Web Crawler[/bold green]")
@@ -162,12 +168,19 @@ async def _run_crawl(
 
 
 async def _find_latest_session(db_path: str) -> str | None:
-    """Return the most recent running/paused session ID, if any."""
-    try:
-        from sqlalchemy import select
-        from storage.db import get_session, init_db
-        from storage.models import CrawlSession, SessionStatus
+    """
+    Return the most recent resumable session ID.
 
+    Preference order:
+    1. running / paused sessions (interrupted crawls)
+    2. completed sessions that still have pending URLs (hit max-pages mid-crawl)
+    """
+    try:
+        from sqlalchemy import func as sqlfunc, select
+        from storage.db import get_session
+        from storage.models import CrawlSession, SessionStatus, URLRecord, URLStatus
+
+        # First: look for actively running / paused sessions
         async with get_session() as db:
             result = await db.execute(
                 select(CrawlSession)
@@ -176,7 +189,31 @@ async def _find_latest_session(db_path: str) -> str | None:
                 .limit(1)
             )
             session = result.scalar_one_or_none()
-            return session.id if session else None
+            if session:
+                return session.id
+
+        # Second: look for recently completed sessions with pending URLs
+        async with get_session() as db:
+            result = await db.execute(
+                select(CrawlSession)
+                .where(CrawlSession.status == SessionStatus.completed)
+                .order_by(CrawlSession.started_at.desc())
+                .limit(5)
+            )
+            candidates = result.scalars().all()
+
+        for candidate in candidates:
+            async with get_session() as db:
+                count = await db.scalar(
+                    select(sqlfunc.count()).where(
+                        URLRecord.session_id == candidate.id,
+                        URLRecord.status == URLStatus.pending,
+                    )
+                )
+            if count and count > 0:
+                return candidate.id
+
+        return None
     except Exception:
         return None
 

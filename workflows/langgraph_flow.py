@@ -143,7 +143,7 @@ async def store_node(state: CrawlState) -> CrawlState:
     page_id = await save_page(page)
     await mark_url_done(state["current_url"])
 
-    if state.get("last_extraction") and state.get("relevance_score", 0) >= 0.3:
+    if state.get("last_extraction") and state.get("relevance_score", 0) >= 0.2:
         extraction = ExtractionResult.model_validate(state["last_extraction"])
         await save_extraction(page_id, extraction, state["session_id"])
 
@@ -186,7 +186,7 @@ def should_extract(state: CrawlState) -> str:
 
     if action == "complete":
         return "complete"
-    if score >= 0.3:
+    if score >= 0.2:
         return "extract"
     return "store"  # skip extraction for low-relevance pages
 
@@ -273,7 +273,8 @@ async def run_langgraph(
     from llm.client import OllamaClient
     from agents.navigator import NavigatorAgent
     from agents.extractor import ExtractorAgent
-    from storage.db import create_crawl_session, get_all_extractions
+    from storage.db import create_crawl_session, finish_crawl_session, get_all_extractions
+    from storage.models import SessionStatus
 
     effective_max_pages = max_pages or config.crawl.max_pages
     effective_max_depth = max_depth or config.crawl.max_depth
@@ -292,8 +293,6 @@ async def run_langgraph(
     from storage.models import URLItem
     for url in start_urls:
         await enqueue_url(URLItem(url=url, session_id=session_id, depth=0))
-
-    graph = build_graph(llm, navigator, extractor)
 
     initial_queue = [{"url": url, "priority": 1.0, "depth": 0} for url in start_urls]
     first_url = initial_queue[0]["url"] if initial_queue else ""
@@ -326,7 +325,9 @@ async def run_langgraph(
             compiled = build_graph(llm, navigator, extractor, checkpointer=checkpointer)
             async for _ in compiled.astream(initial_state, config=config_dict):
                 pass  # progress is tracked inside nodes
+        await finish_crawl_session(session_id, SessionStatus.completed)
     except Exception as exc:
         logger.error("[LangGraph] Graph execution error: %s", exc)
+        await finish_crawl_session(session_id, SessionStatus.failed)
 
     return await get_all_extractions(session_id)

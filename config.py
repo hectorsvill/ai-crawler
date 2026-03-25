@@ -105,6 +105,10 @@ def load_config(user_config_path: str | Path | None = None) -> AppConfig:
     return AppConfig.model_validate(data)
 
 
+# Alias so both `AppConfig` and `Settings` work as imports
+Settings = AppConfig
+
+
 def _apply_env_overrides(data: dict[str, Any]) -> None:
     """
     Apply environment variable overrides using the pattern:

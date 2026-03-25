@@ -106,6 +106,26 @@ def print_summary(stats: SessionStats, extractions: list[dict]) -> None:
     console.print(f"  Extractions:    [green]{stats.extractions}[/green]")
     console.print(f"  Total time:     [white]{stats.elapsed_seconds:.1f}s[/white]")
 
+    # Print token usage report
+    try:
+        from llm.client import token_usage
+        total = token_usage.prompt_tokens + token_usage.completion_tokens
+        if total > 0:
+            console.rule("[bold]Token Usage[/bold]")
+            console.print(
+                f"  Prompt:     [dim]{token_usage.prompt_tokens:,}[/dim]\n"
+                f"  Completion: [dim]{token_usage.completion_tokens:,}[/dim]\n"
+                f"  Total:      [bold]{total:,}[/bold]"
+            )
+            for model, counts in token_usage._per_model.items():
+                m_total = counts["prompt"] + counts["completion"]
+                console.print(
+                    f"  [dim]{model}:[/dim] {m_total:,} tokens "
+                    f"(p={counts['prompt']:,} c={counts['completion']:,})"
+                )
+    except Exception:
+        pass
+
     if extractions:
         console.rule("[bold]Sample Extracted Data[/bold]")
         for i, item in enumerate(extractions[:3]):

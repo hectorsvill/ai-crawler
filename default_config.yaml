@@ -1,6 +1,6 @@
 ollama:
   base_url: "http://localhost:11434"
-  navigator_model: "qwen2.5:1.5b"
+  navigator_model: "qwen2.5:7b"
   extractor_model: "qwen2.5:7b"
   router_model: "qwen2.5:7b"
   timeout: 120

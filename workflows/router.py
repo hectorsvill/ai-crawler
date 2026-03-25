@@ -89,3 +89,49 @@ async def select_workflow(
     except Exception as exc:
         logger.warning("Router LLM failed, defaulting to simple: %s", exc)
         return "simple", f"Router error, defaulted to simple: {exc}"
+
+
+# ── WorkflowRouter class ───────────────────────────────────────────────────────
+
+class WorkflowRouter:
+    """
+    High-level router that can be instantiated without a pre-built LLM client.
+
+    Usage::
+
+        router = WorkflowRouter()
+        result = await router.select("Build a knowledge base on solar energy")
+        print(result.workflow, result.reasoning)
+    """
+
+    def __init__(self, llm: OllamaClient | None = None) -> None:
+        if llm is None:
+            from config import load_config
+            llm = OllamaClient(load_config().ollama)
+        self._llm = llm
+
+    async def select(self, goal: str) -> RouterDecision:
+        """Classify *goal* and return a RouterDecision with .workflow and .reasoning."""
+        user_content = ROUTER_USER_TEMPLATE.format(goal=goal)
+        try:
+            decision = await self._llm.structured_call(
+                model=self._llm.router_model,
+                system_prompt=ROUTER_SYSTEM_PROMPT,
+                user_content=user_content,
+                response_schema=RouterDecision,
+            )
+            logger.info(
+                "Workflow selected: %s (complexity=%s) — %s",
+                decision.workflow,
+                decision.complexity,
+                decision.reasoning,
+            )
+            return decision
+        except Exception as exc:
+            logger.warning("Router LLM failed, defaulting to simple: %s", exc)
+            return RouterDecision(
+                workflow="simple",
+                reasoning=f"Router error, defaulted to simple: {exc}",
+                estimated_pages=1,
+                complexity="low",
+            )

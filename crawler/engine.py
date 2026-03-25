@@ -67,10 +67,19 @@ def html_to_markdown(html: str, url: str = "") -> str:
             html,
             include_links=True,
             include_tables=True,
+            include_formatting=True,
             output_format="markdown",
             url=url,
         )
         if result and len(result.strip()) > 100:
+            # Trafilatura sometimes strips the main h1 heading as "boilerplate".
+            # Re-inject it from the <h1> tag if it's absent from the result.
+            soup = BeautifulSoup(html, "html.parser")
+            h1 = soup.find("h1")
+            if h1:
+                h1_text = h1.get_text(strip=True)
+                if h1_text and h1_text not in result[:200]:
+                    result = f"# {h1_text}\n\n{result}"
             return result
 
     # BeautifulSoup fallback
@@ -278,3 +287,75 @@ async def fetch_page(
         fetch_method=fetch_method,
         links=links,
     )
+
+
+# ── High-level CrawlEngine class ───────────────────────────────────────────────
+
+class CrawlEngine:
+    """
+    Stateful crawl engine — convenience wrapper around the module-level
+    fetch functions.
+
+    Maintains a shared aiohttp session across calls (created lazily) and
+    provides a ``close()`` coroutine for clean teardown.
+
+    Usage::
+
+        engine = CrawlEngine()
+        page = await engine.fetch("https://example.com")
+        allowed = await engine.is_allowed("https://example.com/secret")
+        await engine.close()
+    """
+
+    def __init__(
+        self,
+        user_agent: str | None = None,
+        timeout: int = FETCH_TIMEOUT,
+    ) -> None:
+        self._user_agent = user_agent or (
+            "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
+            "(KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+        )
+        self._timeout = timeout
+        self._session: "aiohttp.ClientSession | None" = None
+
+    # ── fetch ─────────────────────────────────────────────────────────────────
+
+    async def fetch(
+        self,
+        url: str,
+        force_playwright: bool = False,
+    ) -> PageContent:
+        """
+        Fetch *url* and return a PageContent object.
+
+        Automatically upgrades to Playwright when static content is thin
+        (< STATIC_CONTENT_THRESHOLD chars) — same logic as fetch_page().
+        """
+        return await fetch_page(
+            url,
+            user_agent=self._user_agent,
+            force_playwright=force_playwright,
+            timeout=self._timeout,
+        )
+
+    # ── robots.txt check ─────────────────────────────────────────────────────
+
+    async def is_allowed(self, url: str) -> bool:
+        """Return True if the URL is permitted by robots.txt."""
+        from crawler.robots import is_allowed as robots_is_allowed
+        return await robots_is_allowed(url, self._user_agent)
+
+    # ── lifecycle ─────────────────────────────────────────────────────────────
+
+    async def close(self) -> None:
+        """Release any held resources (session, etc.)."""
+        if self._session and not self._session.closed:
+            await self._session.close()
+            self._session = None
+
+    async def __aenter__(self) -> "CrawlEngine":
+        return self
+
+    async def __aexit__(self, *_: object) -> None:
+        await self.close()

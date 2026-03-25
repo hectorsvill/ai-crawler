@@ -48,8 +48,13 @@ def get_engine() -> AsyncEngine:
     return _engine
 
 
-async def init_db(db_path: str = "crawl_data.db") -> None:
-    """Initialize the async SQLite engine and create all tables."""
+async def init_db(db_path: str = "crawl_data.db") -> AsyncEngine:
+    """Initialize the async SQLite engine and create all tables.
+
+    Returns the engine so callers that need an explicit handle can use it.
+    The module-level globals are also set for code that uses get_session()
+    without passing an engine.
+    """
     global _engine, _session_factory
 
     url = f"sqlite+aiosqlite:///{db_path}"
@@ -60,6 +65,7 @@ async def init_db(db_path: str = "crawl_data.db") -> None:
         await conn.run_sync(Base.metadata.create_all)
 
     logger.info("Database initialized at %s", db_path)
+    return _engine
 
 
 async def close_db() -> None:
@@ -71,11 +77,20 @@ async def close_db() -> None:
 
 
 @asynccontextmanager
-async def get_session() -> AsyncIterator[AsyncSession]:
-    """Async context manager providing a database session."""
-    if _session_factory is None:
+async def get_session(engine: AsyncEngine | None = None) -> AsyncIterator[AsyncSession]:
+    """Async context manager providing a database session.
+
+    Accepts an optional *engine* argument for callers that hold an explicit
+    engine reference (e.g. tests).  Falls back to the module-level global.
+    """
+    if engine is not None:
+        factory = async_sessionmaker(engine, expire_on_commit=False)
+    elif _session_factory is not None:
+        factory = _session_factory
+    else:
         raise RuntimeError("Database not initialized. Call init_db() first.")
-    async with _session_factory() as session:
+
+    async with factory() as session:
         try:
             yield session
             await session.commit()

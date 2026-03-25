@@ -51,27 +51,38 @@ class ExtractorAgent:
     """
     LLM-powered agent that extracts structured data from page content.
 
-    Handles long pages by processing the most relevant chunk first,
-    then merging results from subsequent chunks if needed.
+    Can be instantiated without arguments (creates a default OllamaClient)
+    or with an explicit client for dependency injection.
     """
 
-    def __init__(self, llm: "OllamaClient") -> None:
+    def __init__(self, llm: "OllamaClient | None" = None) -> None:
+        if llm is None:
+            from config import load_config
+            from llm.client import OllamaClient as _OC
+            llm = _OC(load_config().ollama)
         self.llm = llm
 
     async def extract(
         self,
-        url: str,
-        markdown: str,
-        goal: str,
+        url: str = "",
+        markdown: str = "",
+        goal: str = "",
         schema_hint: str = "",
         content_hash: str = "",
+        *,
+        # Keyword alias used by spec validation
+        page_markdown: str = "",
     ) -> ExtractionResult:
         """
         Extract structured data from the page.
 
         For long pages, processes the first content chunk. Falls back to
         a minimal result on LLM errors.
+        ``page_markdown`` is an alias for ``markdown`` (spec compatibility).
         """
+        if page_markdown:
+            markdown = page_markdown
+
         user_content = EXTRACTOR_USER_TEMPLATE.format(
             goal=goal,
             url=url,
@@ -80,6 +91,9 @@ class ExtractorAgent:
         )
 
         try:
+            from llm.client import count_tokens
+            logger.debug("[tokens] extractor prompt≈%d", count_tokens(EXTRACTOR_SYSTEM_PROMPT + user_content))
+
             result = await self.llm.structured_call(
                 model=self.llm.extractor_model,
                 system_prompt=EXTRACTOR_SYSTEM_PROMPT,

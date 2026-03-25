@@ -11,6 +11,7 @@ Tables:
 from __future__ import annotations
 
 import enum
+import uuid
 from datetime import datetime
 from typing import Any
 
@@ -134,7 +135,9 @@ class CrawlSession(Base):
 
     __tablename__ = "crawl_sessions"
 
-    id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    id: Mapped[str] = mapped_column(
+        String(64), primary_key=True, default=lambda: str(uuid.uuid4())
+    )
     goal: Mapped[str] = mapped_column(Text, nullable=False)
     workflow_used: Mapped[str] = mapped_column(String(32), nullable=False)
     started_at: Mapped[datetime] = mapped_column(
