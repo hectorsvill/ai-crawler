@@ -1,0 +1,31 @@
+# Core async crawling
+aiohttp>=3.9
+beautifulsoup4>=4.12
+trafilatura>=1.12
+
+# JavaScript rendering
+playwright>=1.40
+
+# Optional enhanced crawling (graceful degradation if absent)
+crawl4ai>=0.4
+
+# LLM integration
+ollama>=0.4
+tiktoken>=0.7
+
+# Structured output & config
+pydantic>=2.0
+pydantic-settings>=2.0
+pyyaml>=6.0
+
+# Storage
+aiosqlite>=0.20
+sqlalchemy[asyncio]>=2.0
+
+# Workflow orchestration (graceful degradation if absent)
+langgraph>=0.2
+crewai[tools]>=0.80
+
+# CLI & display
+rich>=13.0
+typer>=0.12
