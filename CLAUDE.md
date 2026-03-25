@@ -34,12 +34,33 @@ Python version: 3.12. The venv is at `ai-crawler/.venv/`.
 # Syntax-check all Python files
 .venv/bin/python -c "import ast, pathlib; [ast.parse(f.read_text()) for f in pathlib.Path('.').rglob('*.py') if '.venv' not in str(f)]"
 
-# Smoke test (no Ollama/network needed)
-.venv/bin/python -c "
-import asyncio, sys; sys.path.insert(0, '.')
-# ... paste test body from prior session
-"
+# Run the test suite (no Ollama/network needed)
+.venv/bin/python -m pytest tests/ -v
+
+# Run a single test file
+.venv/bin/python -m pytest tests/test_url_utils.py -v
 ```
+
+## Git Workflow
+
+This project uses git for version control. Always track changes:
+
+```bash
+# Check current status
+git status
+
+# Stage and commit source changes (never commit .venv, *.db, .env)
+git add <files>
+git commit -m "Short description of change"
+
+# View history
+git log --oneline -10
+```
+
+**Rules:**
+- Commit after every meaningful change (bug fix, new feature, new tests).
+- Never commit `.venv/`, `*.db`, `*.log`, or `.env` files — all excluded by `.gitignore`.
+- Write commit messages in the imperative mood: "Fix domain filter edge case", not "Fixed…".
 
 ## Architecture
 

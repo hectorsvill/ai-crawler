@@ -20,6 +20,25 @@ from config import CrawlConfig
 logger = logging.getLogger(__name__)
 
 
+# ── Domain matching helper ────────────────────────────────────────────────────
+
+def _domain_matches(domain: str, pattern: str) -> bool:
+    """
+    Match *domain* against *pattern*, supporting glob wildcards.
+
+    Extends ``fnmatch`` so that ``*.example.com`` also matches ``example.com``
+    itself (the parent domain), which is the common expectation for allowlists.
+    """
+    if fnmatch.fnmatch(domain, pattern):
+        return True
+    # *.foo.com should also match foo.com
+    if pattern.startswith("*."):
+        parent_pattern = pattern[2:]  # strip leading "*."
+        if domain == parent_pattern or fnmatch.fnmatch(domain, parent_pattern):
+            return True
+    return False
+
+
 # ── Rate limiter ──────────────────────────────────────────────────────────────
 
 class DomainRateLimiter:
@@ -96,14 +115,14 @@ class DomainFilter:
 
         # Denylist takes priority
         for pattern in self._deny:
-            if fnmatch.fnmatch(domain, pattern):
+            if _domain_matches(domain, pattern):
                 logger.debug("Domain %s blocked by denylist pattern: %s", domain, pattern)
                 return False
 
         # If allowlist is set, URL must match at least one pattern
         if self._allow:
             for pattern in self._allow:
-                if fnmatch.fnmatch(domain, pattern):
+                if _domain_matches(domain, pattern):
                     return True
             logger.debug("Domain %s not in allowlist", domain)
             return False

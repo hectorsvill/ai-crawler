@@ -239,7 +239,51 @@ export CRAWLER_STORAGE__DB_PATH="/data/crawl.db"
 
 ---
 
-## 10. Troubleshooting
+## 10. Running the Test Suite
+
+Tests require no Ollama instance or network connection — they cover all pure-Python logic.
+
+```bash
+# Install test dependencies (one-time)
+pip install pytest pytest-asyncio
+
+# Run all tests
+pytest tests/ -v
+
+# Run a specific module
+pytest tests/test_url_utils.py -v
+pytest tests/test_models.py -v
+```
+
+Test coverage includes:
+| Module | What's tested |
+|--------|---------------|
+| `utils/url.py` | URL normalization, fragment stripping, port removal, query sorting |
+| `storage/models.py` | Score clamping, action validation, Pydantic validators |
+| `llm/client.py` | Token counting, chunking, LLM cache, JSON fence stripping |
+| `crawler/engine.py` | Link extraction, title parsing, HTML→Markdown conversion |
+| `crawler/respectful.py` | Domain filter (allowlist/denylist/wildcard), rate limiter, Playwright detector |
+| `agents/` | Link filtering, history summarization, extraction merging |
+| `storage/db.py` | Content hash determinism and correctness |
+
+---
+
+## 11. Recent Improvements
+
+| Area | Change |
+|------|--------|
+| **URL normalization** | All URLs are canonicalized before queuing (lowercase, strip fragments/default ports/trailing slashes, sort query params) preventing duplicate crawls of semantically identical URLs |
+| **Score clamping** | LLM-returned scores outside [0, 1] are clamped rather than rejected, preventing crawl interruption from out-of-range model output |
+| **Action validation** | `NavigatorDecision.action` values not in `{deepen, backtrack, complete}` safely default to `deepen` |
+| **Multi-chunk extraction** | Long pages now use `extract_chunks` so data spread across multiple context windows is captured and merged |
+| **Domain filter** | `*.example.com` patterns now correctly match `example.com` itself (parent domain) |
+| **Playwright timeout** | Added outer `asyncio.wait_for` around the full browser lifecycle to prevent hang if the browser process stalls |
+| **MIME logging** | Skipped non-HTML responses are now logged at INFO level with the actual content-type |
+| **robots.txt logging** | Distinguishes 404 (no robots.txt) from network errors vs unexpected HTTP status codes |
+
+---
+
+## 12. Troubleshooting
 
 **Ollama not responding:**
 ```bash

@@ -52,10 +52,20 @@ class RobotsCache:
                 ) as resp:
                     if resp.status == 200:
                         return await resp.text(errors="replace")
-                    # Non-200 → treat as allow-all
+                    if resp.status == 404:
+                        logger.debug("robots.txt not found (404) for %s — treating as allow-all", base_url)
+                    else:
+                        logger.debug(
+                            "robots.txt fetch returned HTTP %d for %s — treating as allow-all",
+                            resp.status,
+                            base_url,
+                        )
                     return ""
+        except aiohttp.ClientError as exc:
+            logger.debug("Network error fetching robots.txt for %s: %s", base_url, exc)
+            return ""
         except Exception as exc:
-            logger.debug("Could not fetch robots.txt for %s: %s", base_url, exc)
+            logger.warning("Unexpected error fetching robots.txt for %s: %s", base_url, exc)
             return ""
 
     async def get_parser(self, url: str) -> RobotFileParser:

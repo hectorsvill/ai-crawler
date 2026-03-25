@@ -142,6 +142,7 @@ async def fetch_static(
             resp.raise_for_status()
             content_type = resp.headers.get("content-type", "")
             if "html" not in content_type and "text" not in content_type:
+                logger.info("Skipping %s — unsupported MIME type: %s", url, content_type or "(none)")
                 raise ValueError(f"Non-HTML content type: {content_type}")
             html = await resp.text(errors="replace")
             return html, resp.status
@@ -157,22 +158,32 @@ async def fetch_with_playwright(
     """
     Render a page with Playwright (Chromium) and return the final HTML.
     Waits for network idle to ensure JS has run.
+
+    An outer asyncio.wait_for enforces an absolute deadline for the entire
+    browser lifecycle (launch + navigate + content extraction), preventing
+    hangs when the browser process itself stalls.
     """
     if not HAS_PLAYWRIGHT:
         raise RuntimeError(
             "Playwright is not installed. Run: pip install playwright && playwright install chromium"
         )
 
-    async with async_playwright() as p:
-        browser = await p.chromium.launch(headless=True)
-        context = await browser.new_context(user_agent=user_agent)
-        page = await context.new_page()
-        try:
-            await page.goto(url, timeout=timeout * 1000, wait_until="networkidle")
-            html = await page.content()
-        finally:
-            await browser.close()
-    return html
+    import asyncio
+
+    async def _run() -> str:
+        async with async_playwright() as p:
+            browser = await p.chromium.launch(headless=True)
+            context = await browser.new_context(user_agent=user_agent)
+            page = await context.new_page()
+            try:
+                await page.goto(url, timeout=timeout * 1000, wait_until="networkidle")
+                html = await page.content()
+            finally:
+                await browser.close()
+        return html
+
+    # Add 30 s headroom above the page-level timeout for browser lifecycle
+    return await asyncio.wait_for(_run(), timeout=timeout + 30)
 
 
 # ── crawl4ai integration ───────────────────────────────────────────────────────

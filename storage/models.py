@@ -14,7 +14,7 @@ import enum
 from datetime import datetime
 from typing import Any
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 from sqlalchemy import (
     JSON,
     DateTime,
@@ -180,18 +180,36 @@ class LinkPriority(BaseModel):
     """A discovered link with its priority assessment from the Navigator."""
 
     url: str
-    priority: float = Field(ge=0.0, le=1.0)
+    priority: float = Field(default=0.5)
     reasoning: str
-    estimated_value: float = Field(ge=0.0, le=1.0)
+    estimated_value: float = Field(default=0.5)
+
+    @field_validator("priority", "estimated_value", mode="before")
+    @classmethod
+    def clamp_01(cls, v: Any) -> float:
+        """Clamp to [0, 1] instead of rejecting out-of-range LLM output."""
+        return max(0.0, min(1.0, float(v)))
 
 
 class NavigatorDecision(BaseModel):
     """Decision returned by the Navigator agent for a given page."""
 
-    relevance_score: float = Field(ge=0.0, le=1.0)
+    relevance_score: float = Field(default=0.0)
     links_to_follow: list[LinkPriority] = Field(default_factory=list)
-    action: str  # "deepen" | "backtrack" | "complete"
-    reasoning: str
+    action: str = "deepen"  # "deepen" | "backtrack" | "complete"
+    reasoning: str = ""
+
+    @field_validator("relevance_score", mode="before")
+    @classmethod
+    def clamp_relevance(cls, v: Any) -> float:
+        return max(0.0, min(1.0, float(v)))
+
+    @field_validator("action", mode="before")
+    @classmethod
+    def validate_action(cls, v: Any) -> str:
+        valid = {"deepen", "backtrack", "complete"}
+        s = str(v).lower().strip()
+        return s if s in valid else "deepen"
 
 
 class ExtractionResult(BaseModel):
@@ -199,8 +217,13 @@ class ExtractionResult(BaseModel):
 
     data: dict[str, Any]
     schema_used: str
-    confidence: float = Field(ge=0.0, le=1.0)
-    explanation: str
+    confidence: float = Field(default=0.0)
+    explanation: str = ""
+
+    @field_validator("confidence", mode="before")
+    @classmethod
+    def clamp_confidence(cls, v: Any) -> float:
+        return max(0.0, min(1.0, float(v)))
 
 
 class SessionStats(BaseModel):

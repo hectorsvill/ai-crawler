@@ -6,6 +6,7 @@ env/
 # Python cache
 __pycache__/
 *.py[cod]
+.pytest_cache/
 *.pyo
 *.pyd
 *.so

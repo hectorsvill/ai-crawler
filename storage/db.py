@@ -132,8 +132,17 @@ async def finish_crawl_session(session_id: str, status: SessionStatus) -> None:
 async def enqueue_url(item: URLItem) -> bool:
     """
     Add a URL to the queue if not already present.
+
+    The URL is normalized before insertion so that semantically identical
+    URLs (different encoding, trailing slashes, etc.) are deduplicated.
     Returns True if inserted, False if already exists.
     """
+    from utils.url import normalize_url
+
+    canonical = normalize_url(item.url)
+    if canonical != item.url:
+        item = item.model_copy(update={"url": canonical})
+
     async with get_session() as db:
         existing = await db.scalar(
             select(URLRecord).where(URLRecord.url == item.url)

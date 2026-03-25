@@ -39,6 +39,7 @@ from storage.models import (
     URLStatus,
 )
 from utils.progress import CrawlProgress, print_summary
+from utils.url import normalize_url
 
 logger = logging.getLogger(__name__)
 
@@ -99,9 +100,9 @@ async def run_simple(
             workflow_used="simple",
             start_urls=start_urls,
         )
-        # Seed the queue
+        # Seed the queue — normalize URLs before enqueuing
         for url in start_urls:
-            await enqueue_url(URLItem(url=url, session_id=session_id, depth=0))
+            await enqueue_url(URLItem(url=normalize_url(url), session_id=session_id, depth=0))
     else:
         logger.info("Resuming session %s", session_id)
 
@@ -159,9 +160,10 @@ async def run_simple(
             stats.pages_crawled += 1
 
             # Extract if relevant enough
+            # Use extract_chunks for long pages so data in later chunks isn't lost
             if decision.relevance_score >= 0.3:
                 try:
-                    extraction = await extractor.extract(
+                    extraction = await extractor.extract_chunks(
                         url=item.url,
                         markdown=page.markdown,
                         goal=goal,
@@ -176,13 +178,13 @@ async def run_simple(
                 except Exception as exc:
                     logger.error("Extraction failed for %s: %s", item.url, exc)
 
-            # Queue new links
+            # Queue new links — normalize URLs to prevent duplicate queue entries
             if decision.action in ("deepen",) and item.depth < effective_max_depth:
                 new_depth = item.depth + 1
                 for link_priority in decision.links_to_follow[:10]:
                     queued = await enqueue_url(
                         URLItem(
-                            url=link_priority.url,
+                            url=normalize_url(link_priority.url),
                             priority=link_priority.priority,
                             depth=new_depth,
                             relevance_score=link_priority.estimated_value,
