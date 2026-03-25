@@ -27,6 +27,8 @@ htmlcov/
 # Runtime data
 crawl_data.db
 *.db
+*.db-shm
+*.db-wal
 *.sqlite
 *.sqlite3
 
