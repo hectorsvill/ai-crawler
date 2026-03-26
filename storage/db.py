@@ -144,6 +144,67 @@ async def finish_crawl_session(session_id: str, status: SessionStatus) -> None:
 
 # ── URL queue helpers ─────────────────────────────────────────────────────────
 
+async def add_to_queue(
+    session: AsyncSession,
+    urls: list[str],
+    *,
+    session_id: str | int | None = None,
+    priority: float = 0.5,
+    depth: int = 0,
+    parent_url: str | None = None,
+) -> int:
+    """Spec-compatible bulk enqueue: add a list of URL strings to the queue.
+
+    Silently skips duplicates.  Returns the number of URLs inserted.
+    """
+    from utils.url import normalize_url
+
+    inserted = 0
+    for raw_url in urls:
+        canonical = normalize_url(raw_url)
+        existing = await session.scalar(
+            select(URLRecord).where(URLRecord.url == canonical)
+        )
+        if existing:
+            continue
+        record = URLRecord(
+            url=canonical,
+            priority=priority,
+            depth=depth,
+            relevance_score=0.0,
+            status=URLStatus.pending,
+            session_id=str(session_id) if session_id is not None else None,
+            parent_url=parent_url,
+        )
+        session.add(record)
+        inserted += 1
+    return inserted
+
+
+async def get_next_url(
+    session: AsyncSession,
+    session_id: str | int | None = None,
+) -> URLRecord | None:
+    """Spec-compatible: fetch the highest-priority pending URL and mark it in_progress.
+
+    Returns the ORM URLRecord (with a .url attribute), or None if the queue is empty.
+    """
+    result = await session.execute(
+        select(URLRecord)
+        .where(
+            URLRecord.session_id == str(session_id) if session_id is not None else True,
+            URLRecord.status == URLStatus.pending,
+        )
+        .order_by(URLRecord.priority.desc())
+        .limit(1)
+    )
+    record = result.scalar_one_or_none()
+    if record is None:
+        return None
+    record.status = URLStatus.in_progress
+    return record
+
+
 async def enqueue_url(item: URLItem) -> bool:
     """
     Add a URL to the queue if not already present.

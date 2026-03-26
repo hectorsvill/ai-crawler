@@ -177,6 +177,8 @@ class PageContent(BaseModel):
     content_hash: str
     fetch_method: str = "aiohttp"
     links: list[str] = Field(default_factory=list)
+    status_code: int = 200
+    error: str | None = None
 
 
 class LinkPriority(BaseModel):

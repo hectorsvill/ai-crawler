@@ -208,3 +208,57 @@ async def run_simple(
     extractions = await get_all_extractions(session_id)
     print_summary(stats, extractions)
     return extractions
+
+
+# ── Class-based façade (spec-compatible) ──────────────────────────────────────
+
+class SimpleWorkflow:
+    """
+    Spec-compatible façade around run_simple().
+
+    Accepts pre-built components (engine, navigator, extractor, db_engine, config)
+    so callers can inject their own instances.  ``run()`` delegates to run_simple().
+    """
+
+    def __init__(
+        self,
+        engine: Any,
+        navigator: Any,
+        extractor: Any,
+        db_engine: Any,
+        config: AppConfig,
+    ) -> None:
+        self._engine = engine
+        self._navigator = navigator
+        self._extractor = extractor
+        self._db_engine = db_engine
+        self._config = config
+
+    async def run(
+        self,
+        goal: str,
+        start_url: str | list[str],
+        session_id: str | None = None,
+    ) -> list[dict[str, Any]]:
+        """Run the simple workflow for *goal* starting from *start_url*.
+
+        When *session_id* refers to a pre-created session that has no URLs
+        queued yet, seed the queue with *start_url* before delegating to
+        run_simple (which only re-seeds when session_id is None).
+        """
+        urls = [start_url] if isinstance(start_url, str) else start_url
+        sid_str = str(session_id) if session_id is not None else None
+
+        # Seed queue when a pre-created session has no pending URLs
+        if sid_str is not None:
+            pending = await get_pending_count(sid_str)
+            if pending == 0:
+                for url in urls:
+                    await enqueue_url(URLItem(url=normalize_url(url), session_id=sid_str, depth=0))
+
+        return await run_simple(
+            goal=goal,
+            start_urls=urls,
+            config=self._config,
+            session_id=sid_str,
+        )

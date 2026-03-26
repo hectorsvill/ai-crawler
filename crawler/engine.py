@@ -309,14 +309,28 @@ class CrawlEngine:
 
     def __init__(
         self,
-        user_agent: str | None = None,
+        config_or_user_agent: Any = None,
         timeout: int = FETCH_TIMEOUT,
+        *,
+        user_agent: str | None = None,
     ) -> None:
-        self._user_agent = user_agent or (
+        # Accept a CrawlConfig object, a plain user-agent string, or user_agent= kwarg
+        _default_ua = (
             "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
             "(KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
         )
-        self._timeout = timeout
+        if config_or_user_agent is not None and hasattr(config_or_user_agent, "user_agents"):
+            cfg = config_or_user_agent
+            import random
+            self._user_agent = user_agent or (
+                random.choice(cfg.user_agents) if cfg.user_agents else _default_ua
+            )
+            self._timeout = getattr(cfg, "timeout", timeout)
+            self._config = cfg
+        else:
+            self._user_agent = user_agent or config_or_user_agent or _default_ua
+            self._timeout = timeout
+            self._config = None
         self._session: "aiohttp.ClientSession | None" = None
 
     # ── fetch ─────────────────────────────────────────────────────────────────

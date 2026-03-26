@@ -105,8 +105,11 @@ def load_config(user_config_path: str | Path | None = None) -> AppConfig:
     return AppConfig.model_validate(data)
 
 
-# Alias so both `AppConfig` and `Settings` work as imports
-Settings = AppConfig
+# Alias so both `AppConfig` and `Settings` work as imports.
+# Settings() with no args loads from YAML; Settings(path) loads a custom config.
+def Settings(user_config_path=None) -> AppConfig:  # type: ignore[misc]
+    """Convenience wrapper: Settings() == load_config()."""
+    return load_config(user_config_path)
 
 
 def _apply_env_overrides(data: dict[str, Any]) -> None:
