@@ -90,11 +90,13 @@ class NavigatorAgent:
         if links is None:
             links = []
 
-        # Format links for the prompt (limit to 50 to save tokens)
-        links_display = links[:50]
+        # Format links for the prompt (limit to 50 to save tokens).
+        # Pre-filter obvious navigation/utility noise so the Navigator sees
+        # actual content links rather than sidebar/interlanguage junk.
+        links_display = _select_candidate_links(links, n=50)
         links_list = "\n".join(f"- {link}" for link in links_display)
-        if len(links) > 50:
-            links_list += f"\n... and {len(links) - 50} more"
+        if len(links) > len(links_display):
+            links_list += f"\n... and {len(links) - len(links_display)} more"
 
         user_content = NAVIGATOR_USER_TEMPLATE.format(
             goal=goal,
@@ -133,6 +135,64 @@ class NavigatorAgent:
                 action="backtrack",
                 reasoning=f"Navigator error: {exc}",
             )
+
+
+_NOISE_PATTERNS = (
+    # Wikipedia/MediaWiki utility paths
+    "/wiki/Special:",
+    "/wiki/Wikipedia:",
+    "/wiki/Help:",
+    "/wiki/Template:",
+    "/wiki/Category:",
+    "/wiki/Portal:",
+    "/wiki/Talk:",
+    "/wiki/User:",
+    "/wiki/File:",
+    "index.php?action=",
+    "index.php?title=Special:",
+    # Interlanguage links — non-English Wikipedia domains like de.wikipedia.org
+    # Detected by checking netloc after stripping www.
+)
+
+_INTERLANG_RE = None  # lazy init
+
+
+def _is_interlang(url: str) -> bool:
+    """Return True for non-English Wikipedia language editions."""
+    import re
+
+    global _INTERLANG_RE
+    if _INTERLANG_RE is None:
+        _INTERLANG_RE = re.compile(r"https?://[a-z]{2,3}\.wikipedia\.org/")
+    if _INTERLANG_RE.match(url):
+        # Allow en.wikipedia.org
+        return "//en.wikipedia.org/" not in url
+    return False
+
+
+def _select_candidate_links(links: list[str], n: int = 50) -> list[str]:
+    """
+    Return up to *n* links that are most likely to be content pages.
+
+    Strategy:
+    1. Remove obvious navigation/utility noise (Special:, Help:, etc.)
+       and interlanguage links.
+    2. If enough clean links remain, return the first *n*.
+    3. If not enough, fall back to including noise links to fill *n*.
+    """
+    clean: list[str] = []
+    noisy: list[str] = []
+    for link in links:
+        if _is_interlang(link) or any(p in link for p in _NOISE_PATTERNS):
+            noisy.append(link)
+        else:
+            clean.append(link)
+
+    if len(clean) >= n:
+        return clean[:n]
+    # Pad with noise links if not enough clean ones
+    combined = clean + noisy
+    return combined[:n]
 
 
 def _filter_valid_links(

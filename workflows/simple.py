@@ -142,6 +142,25 @@ async def run_simple(
                 stats.pages_failed += 1
                 continue
 
+            # Skip LLM calls entirely if content is unchanged (hash match)
+            from storage.db import get_session as _get_session, get_engine as _get_engine
+            from sqlalchemy import select as _select
+            from storage.models import VisitedPage as _VisitedPage
+            try:
+                async with _get_session() as _s:
+                    _existing = await _s.scalar(
+                        _select(_VisitedPage).where(_VisitedPage.content_hash == page.content_hash)
+                    )
+                    if _existing:
+                        logger.info("Content unchanged for %s (hash match) — skipping LLM", item.url)
+                        await mark_url_done(item.url)
+                        visited_urls.append(item.url)
+                        stats.pages_crawled += 1
+                        stats.pages_skipped += 1
+                        continue
+            except Exception:
+                pass  # if check fails, proceed normally
+
             # Navigator decision
             history_summary = summarize_history(visited_urls)
             decision = await navigator.decide(
@@ -158,6 +177,41 @@ async def run_simple(
             await mark_url_done(item.url)
             visited_urls.append(item.url)
             stats.pages_crawled += 1
+
+            # Queue new links before extraction so a mid-extraction interrupt
+            # doesn't lose the Navigator's link decisions.
+            if decision.action in ("deepen",) and item.depth < effective_max_depth:
+                new_depth = item.depth + 1
+                for link_priority in decision.links_to_follow[:10]:
+                    queued = await enqueue_url(
+                        URLItem(
+                            url=normalize_url(link_priority.url),
+                            priority=link_priority.priority,
+                            depth=new_depth,
+                            relevance_score=link_priority.estimated_value,
+                            session_id=session_id,
+                            parent_url=item.url,
+                        )
+                    )
+                    if queued:
+                        logger.debug("Queued: %s (priority %.2f)", link_priority.url, link_priority.priority)
+
+            elif decision.action == "complete":
+                progress.print("[bold green]Navigator signaled goal complete![/bold green]")
+                # Still extract from this final page before stopping
+                if decision.relevance_score >= 0.2:
+                    try:
+                        extraction = await extractor.extract_chunks(
+                            url=item.url,
+                            markdown=page.markdown,
+                            goal=goal,
+                            content_hash=page.content_hash,
+                        )
+                        await save_extraction(page_id, extraction, session_id)
+                        stats.extractions += 1
+                    except Exception as exc:
+                        logger.error("Extraction failed for %s: %s", item.url, exc)
+                break
 
             # Extract if relevant enough (≥ 0.2 avoids clearly-irrelevant pages
             # while still capturing borderline pages the Navigator is uncertain about)
@@ -177,27 +231,6 @@ async def run_simple(
                     )
                 except Exception as exc:
                     logger.error("Extraction failed for %s: %s", item.url, exc)
-
-            # Queue new links — normalize URLs to prevent duplicate queue entries
-            if decision.action in ("deepen",) and item.depth < effective_max_depth:
-                new_depth = item.depth + 1
-                for link_priority in decision.links_to_follow[:10]:
-                    queued = await enqueue_url(
-                        URLItem(
-                            url=normalize_url(link_priority.url),
-                            priority=link_priority.priority,
-                            depth=new_depth,
-                            relevance_score=link_priority.estimated_value,
-                            session_id=session_id,
-                            parent_url=item.url,
-                        )
-                    )
-                    if queued:
-                        logger.debug("Queued: %s (priority %.2f)", link_priority.url, link_priority.priority)
-
-            elif decision.action == "complete":
-                progress.print("[bold green]Navigator signaled goal complete![/bold green]")
-                break
 
             # Persist stats
             await update_session_stats(session_id, stats.model_dump())
