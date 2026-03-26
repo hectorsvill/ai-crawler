@@ -2,10 +2,14 @@
 main.py — CLI entrypoint for the AI Web Crawler.
 
 Commands:
-  crawl   Run a crawl with a natural language goal.
-  resume  Resume a paused or interrupted crawl session.
-  list    List recent crawl sessions.
-  export  Export extracted data from a session to JSON.
+  crawl            Run a crawl with a natural language goal.
+  resume           Resume a paused or interrupted crawl session.
+  list-sessions    List recent crawl sessions.
+  export           Export extracted data from a session to JSON.
+  research         Crawl academic/P2P research sources and store papers.
+  research-search  Full-text search across all stored research papers.
+  research-list    Browse all stored research papers.
+  research-show    Show full details for one paper by ID.
 
 Uses Typer for CLI parsing and Rich for terminal output.
 """
@@ -358,6 +362,247 @@ async def _resume_session(
     else:
         from workflows.simple import run_simple
         await run_simple(**kwargs)
+
+
+# ── Research command ───────────────────────────────────────────────────────────
+
+@app.command()
+def research(
+    goal: str = typer.Option(..., "--goal", "-g", help="Research goal (natural language)."),
+    start_url: list[str] = typer.Option(
+        [], "--start-url", "-u", help="Seed URL(s). Repeatable."
+    ),
+    config_path: Optional[Path] = typer.Option(None, "--config", "-c"),
+    max_pages: Optional[int] = typer.Option(None, "--max-pages", help="Max pages to crawl."),
+    max_depth: Optional[int] = typer.Option(None, "--max-depth", help="Max link depth."),
+    model: Optional[str] = typer.Option(None, "--model", help="Override extractor model."),
+    verbose: bool = typer.Option(False, "--verbose", "-v", help="Debug logging."),
+) -> None:
+    """
+    Crawl academic/P2P research sources and store papers in the central DB.
+
+    All papers are deduplicated by DOI/arXiv ID across sessions and are
+    full-text searchable via `research-search`.
+
+    Example seeds:
+      --start-url "https://arxiv.org/search/?query=peer+to+peer+network&searchtype=all"
+      --start-url "https://scholar.google.com/scholar?q=distributed+systems"
+    """
+    if verbose:
+        logging.getLogger().setLevel(logging.DEBUG)
+    asyncio.run(_run_research(goal, start_url, config_path, max_pages, max_depth, model))
+
+
+async def _run_research(
+    goal: str,
+    start_urls: list[str],
+    config_path: Path | None,
+    max_pages: int | None,
+    max_depth: int | None,
+    model: str | None,
+) -> None:
+    from config import load_config
+    from llm.client import check_ollama_reachable
+    from storage.db import init_db
+    from workflows.research import run_research
+
+    config = load_config(config_path)
+
+    if not await check_ollama_reachable(config.ollama.base_url):
+        raise typer.Exit(1)
+
+    await init_db(config.storage.db_path)
+
+    if not start_urls:
+        console.print("[red]No start URLs provided. Use --start-url/-u[/red]")
+        raise typer.Exit(1)
+
+    console.rule("[bold green]AI Research Crawler[/bold green]")
+    console.print(f"  Goal:  [cyan]{goal}[/cyan]")
+    for url in start_urls:
+        console.print(f"  Seed:  [dim]{url}[/dim]")
+    console.print()
+
+    await run_research(
+        goal=goal,
+        start_urls=start_urls,
+        config=config,
+        max_pages=max_pages,
+        max_depth=max_depth,
+        model=model,
+    )
+
+
+# ── Research search command ────────────────────────────────────────────────────
+
+@app.command(name="research-search")
+def research_search(
+    query: str = typer.Argument(..., help="FTS5 search query."),
+    session: Optional[str] = typer.Option(None, "--session", "-s", help="Filter to one session."),
+    limit: int = typer.Option(20, "--limit", "-n", help="Max results."),
+    config_path: Optional[Path] = typer.Option(None, "--config", "-c"),
+) -> None:
+    """
+    Full-text search across ALL stored research papers (cross-session).
+
+    Supports FTS5 query syntax:
+      research-search "prompt injection"
+      research-search '"adversarial attack" AND transformer'
+      research-search 'neural*'
+    """
+    asyncio.run(_research_search(query, session, limit, config_path))
+
+
+async def _research_search(
+    query: str,
+    session_id: str | None,
+    limit: int,
+    config_path: Path | None,
+) -> None:
+    from config import load_config
+    from storage.db import init_db
+    from storage.research import init_research_fts, search_research_papers
+
+    config = load_config(config_path)
+    engine_obj = await init_db(config.storage.db_path)
+    await init_research_fts(engine_obj)
+
+    results = await search_research_papers(query, limit=limit, session_id=session_id)
+
+    if not results:
+        console.print(f"[yellow]No papers found for: {query}[/yellow]")
+        return
+
+    _print_papers_table(results, title=f'Research: "{query}" — {len(results)} result(s)')
+
+
+# ── Research list command ──────────────────────────────────────────────────────
+
+@app.command(name="research-list")
+def research_list(
+    session: Optional[str] = typer.Option(None, "--session", "-s", help="Filter to one session."),
+    year: Optional[int] = typer.Option(None, "--year", "-y", help="Filter by publication year."),
+    limit: int = typer.Option(50, "--limit", "-n", help="Max results."),
+    offset: int = typer.Option(0, "--offset", help="Pagination offset."),
+    config_path: Optional[Path] = typer.Option(None, "--config", "-c"),
+) -> None:
+    """Browse all stored research papers (newest first)."""
+    asyncio.run(_research_list(session, year, limit, offset, config_path))
+
+
+async def _research_list(
+    session_id: str | None,
+    year: int | None,
+    limit: int,
+    offset: int,
+    config_path: Path | None,
+) -> None:
+    from config import load_config
+    from storage.db import init_db
+    from storage.research import get_research_stats, init_research_fts, list_research_papers
+
+    config = load_config(config_path)
+    engine_obj = await init_db(config.storage.db_path)
+    await init_research_fts(engine_obj)
+
+    stats = await get_research_stats()
+    papers = await list_research_papers(session_id=session_id, year=year, limit=limit, offset=offset)
+
+    if not papers:
+        console.print("[yellow]No research papers stored yet. Run `research` first.[/yellow]")
+        return
+
+    title = (
+        f"Research Papers — {stats['total_papers']} total "
+        f"({stats['sessions_with_papers']} session(s))"
+    )
+    _print_papers_table(papers, title=title)
+
+
+# ── Research show command ──────────────────────────────────────────────────────
+
+@app.command(name="research-show")
+def research_show(
+    paper_id: int = typer.Argument(..., help="Paper ID (from research-list)."),
+    config_path: Optional[Path] = typer.Option(None, "--config", "-c"),
+) -> None:
+    """Show full details for one research paper."""
+    asyncio.run(_research_show(paper_id, config_path))
+
+
+async def _research_show(paper_id: int, config_path: Path | None) -> None:
+    from rich.panel import Panel
+
+    from config import load_config
+    from storage.db import init_db
+    from storage.research import get_research_paper, init_research_fts
+
+    config = load_config(config_path)
+    engine_obj = await init_db(config.storage.db_path)
+    await init_research_fts(engine_obj)
+
+    paper = await get_research_paper(paper_id)
+    if not paper:
+        console.print(f"[red]No paper found with ID {paper_id}[/red]")
+        raise typer.Exit(1)
+
+    authors_str = ", ".join(paper.get("authors") or []) or "—"
+    keywords_str = ", ".join(paper.get("keywords") or []) or "—"
+    year_str = str(paper.get("year") or "—")
+    doi_str = paper.get("doi") or "—"
+    arxiv_str = paper.get("arxiv_id") or "—"
+    venue_str = paper.get("venue") or "—"
+    conf_str = f"{paper.get('confidence', 0):.2f}"
+    abstract = paper.get("abstract") or "(no abstract extracted)"
+
+    body = (
+        f"[bold]Title:[/bold]    {paper.get('title') or '(unknown)'}\n"
+        f"[bold]Authors:[/bold]  {authors_str}\n"
+        f"[bold]Year:[/bold]     {year_str}\n"
+        f"[bold]Venue:[/bold]    {venue_str}\n"
+        f"[bold]DOI:[/bold]      {doi_str}\n"
+        f"[bold]arXiv:[/bold]    {arxiv_str}\n"
+        f"[bold]Keywords:[/bold] {keywords_str}\n"
+        f"[bold]Confidence:[/bold] {conf_str}\n"
+        f"[bold]URL:[/bold]      {paper.get('source_url', '')}\n"
+        f"[bold]Session:[/bold]  {paper.get('session_id', '')[:16]}\n\n"
+        f"[bold]Abstract:[/bold]\n{abstract}"
+    )
+    console.print(Panel(body, title=f"Paper #{paper_id}", border_style="cyan"))
+
+
+# ── Shared rendering helper ────────────────────────────────────────────────────
+
+def _print_papers_table(papers: list[dict], title: str = "Research Papers") -> None:
+    """Render a list of paper dicts as a Rich table."""
+    table = Table(title=title, show_lines=True)
+    table.add_column("ID", style="cyan", width=5)
+    table.add_column("Year", style="yellow", width=6)
+    table.add_column("Title", max_width=55)
+    table.add_column("First Author", max_width=22)
+    table.add_column("Venue", max_width=25)
+    table.add_column("DOI / arXiv", max_width=22)
+    table.add_column("Conf", width=5)
+
+    for p in papers:
+        authors = p.get("authors") or []
+        first_author = authors[0] if authors else "—"
+        if len(authors) > 1:
+            first_author += " et al."
+
+        doi_arxiv = p.get("doi") or p.get("arxiv_id") or "—"
+
+        table.add_row(
+            str(p.get("id", "")),
+            str(p.get("year") or "—"),
+            (p.get("title") or p.get("source_url", ""))[:55],
+            first_author[:22],
+            (p.get("venue") or "—")[:25],
+            doi_arxiv[:22],
+            f"{p.get('confidence', 0):.2f}",
+        )
+
+    console.print(table)
 
 
 # ── Entrypoint ─────────────────────────────────────────────────────────────────

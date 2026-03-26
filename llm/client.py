@@ -354,16 +354,39 @@ def _parse_llm_response(raw: str, schema: type[T]) -> T:
         data = json.loads(text)
         return schema.model_validate(data)
     except json.JSONDecodeError as json_exc:
-        # Try a lenient fallback: strip trailing commas and common LLM quirks
+        # Progressive JSON repair — each step tries increasingly aggressive fixes
+        import re as _re
+
+        repaired = text
+
+        # Step 1: Remove trailing commas before } or ]
+        repaired = _re.sub(r",\s*([}\]])", r"\1", repaired)
         try:
-            import re as _re
-            # Remove trailing commas before } or ]
-            cleaned = _re.sub(r",\s*([}\]])", r"\1", text)
-            data = json.loads(cleaned)
+            data = json.loads(repaired)
             logger.debug("JSON recovered after trailing-comma cleanup")
             return schema.model_validate(data)
         except Exception:
             pass
+
+        # Step 2: Fix invalid \escape sequences (e.g. \( \) \_ from markdown)
+        # Replace lone backslashes not followed by valid JSON escape chars
+        repaired2 = _re.sub(r'\\([^"\\/bfnrtu])', r'\1', repaired)
+        try:
+            data = json.loads(repaired2)
+            logger.debug("JSON recovered after backslash-escape repair")
+            return schema.model_validate(data)
+        except Exception:
+            pass
+
+        # Step 3: Both fixes combined
+        repaired3 = _re.sub(r'\\([^"\\/bfnrtu])', r'\1', repaired)
+        try:
+            data = json.loads(repaired3)
+            logger.debug("JSON recovered after combined repair")
+            return schema.model_validate(data)
+        except Exception:
+            pass
+
         logger.error("Failed to parse LLM response: %s\nRaw: %.200s", json_exc, raw)
         raise ValueError(f"LLM returned unparseable JSON: {json_exc}") from json_exc
     except Exception as exc:

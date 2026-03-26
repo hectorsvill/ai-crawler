@@ -26,6 +26,7 @@ from sqlalchemy import (
     Integer,
     String,
     Text,
+    UniqueConstraint,
     func,
 )
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
@@ -61,12 +62,14 @@ class URLRecord(Base):
 
     __tablename__ = "urls"
     __table_args__ = (
+        # Per-session uniqueness: same URL can appear in different sessions
+        UniqueConstraint("url", "session_id", name="uq_urls_url_session"),
         Index("ix_urls_status_priority", "status", "priority"),
         Index("ix_urls_session", "session_id"),
     )
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
-    url: Mapped[str] = mapped_column(String(2048), unique=True, nullable=False)
+    url: Mapped[str] = mapped_column(String(2048), nullable=False)  # unique per session
     priority: Mapped[float] = mapped_column(Float, default=0.5)
     depth: Mapped[int] = mapped_column(Integer, default=0)
     relevance_score: Mapped[float] = mapped_column(Float, default=0.0)
@@ -241,3 +244,90 @@ class SessionStats(BaseModel):
     queue_size: int = 0
     current_url: str = ""
     elapsed_seconds: float = 0.0
+
+
+# ── Research paper models ──────────────────────────────────────────────────────
+
+class CrawlLog(Base):
+    """Audit trail for crawler decisions, fetches, and errors."""
+
+    __tablename__ = "crawl_logs"
+    __table_args__ = (
+        Index("ix_crawl_logs_session_id", "session_id"),
+        Index("ix_crawl_logs_timestamp", "timestamp"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    session_id: Mapped[str] = mapped_column(String(64), nullable=False)
+    timestamp: Mapped[datetime] = mapped_column(
+        DateTime, server_default=func.now(), nullable=False
+    )
+    level: Mapped[str] = mapped_column(String(16), default="info")
+    component: Mapped[str] = mapped_column(String(32), default="")
+    message: Mapped[str] = mapped_column(Text, nullable=False)
+    extra_data: Mapped[dict | None] = mapped_column(JSON, nullable=True)
+
+
+class ResearchPaper(Base):
+    """
+    Structured bibliographic record extracted from a crawled academic page.
+
+    Persists across crawl sessions — every research crawl feeds the same
+    central table so all papers are cross-session searchable.
+    An FTS5 virtual table (research_papers_fts) is kept in sync via triggers
+    created in storage.research.init_research_fts().
+    """
+
+    __tablename__ = "research_papers"
+    __table_args__ = (
+        Index("ix_research_papers_session", "session_id"),
+        Index("ix_research_papers_year", "year"),
+        Index("ix_research_papers_content_hash", "content_hash"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    session_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    source_url: Mapped[str] = mapped_column(String(2048), nullable=False)
+    page_id: Mapped[int | None] = mapped_column(
+        Integer, ForeignKey("visited_pages.id", ondelete="SET NULL"), nullable=True
+    )
+
+    # Bibliographic fields — all nullable; LLM confidence varies
+    title: Mapped[str | None] = mapped_column(Text, nullable=True)
+    authors: Mapped[list[str] | None] = mapped_column(JSON, nullable=True)
+    abstract: Mapped[str | None] = mapped_column(Text, nullable=True)
+    year: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    doi: Mapped[str | None] = mapped_column(String(256), nullable=True)
+    arxiv_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    venue: Mapped[str | None] = mapped_column(String(512), nullable=True)
+    keywords: Mapped[list[str] | None] = mapped_column(JSON, nullable=True)
+    pdf_url: Mapped[str | None] = mapped_column(String(2048), nullable=True)
+    content_hash: Mapped[str | None] = mapped_column(String(64), nullable=True)
+
+    # Provenance
+    confidence: Mapped[float] = mapped_column(Float, default=0.0)
+    schema_used: Mapped[str] = mapped_column(String(64), default="research_paper_v1")
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime, server_default=func.now(), nullable=False
+    )
+
+
+class ResearchPaperData(BaseModel):
+    """Structured data returned by ResearchExtractorAgent."""
+
+    title: str | None = None
+    authors: list[str] = Field(default_factory=list)
+    abstract: str | None = None
+    year: int | None = None
+    doi: str | None = None
+    arxiv_id: str | None = None
+    venue: str | None = None
+    keywords: list[str] = Field(default_factory=list)
+    pdf_url: str | None = None
+    confidence: float = Field(default=0.0)
+    explanation: str = ""
+
+    @field_validator("confidence", mode="before")
+    @classmethod
+    def clamp_confidence(cls, v: Any) -> float:
+        return max(0.0, min(1.0, float(v)))
