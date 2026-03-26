@@ -1,5 +1,10 @@
 # AI Web Crawler — Usage Guide
 
+> **See also:**
+> - [`architecture.md`](architecture.md) — how the pipeline works internally
+> - [`configuration.md`](configuration.md) — every config field explained
+> - [`development.md`](development.md) — adding workflows, agents, testing
+
 ## Table of Contents
 
 1. [Quick Start](#1-quick-start)
@@ -323,21 +328,36 @@ result = await ext.extract_chunks(url, markdown, goal)
 
 ```python
 import asyncio
+from config import Settings
 from llm.client import LLMClient
+from pydantic import BaseModel
+
+class Company(BaseModel):
+    name: str
+    founded: int
+    is_public: bool
 
 async def main():
-    client = LLMClient(default_model="qwen2.5:7b")
+    # Pass an OllamaConfig object (recommended) or keyword args
+    client = LLMClient(Settings().ollama)
+
+    # Check Ollama is up
+    assert await client.check_health()
 
     # Plain text
     text = await client.generate("Summarize AI safety in 2 sentences.")
     print(text)
 
-    # Structured JSON
-    data = await client.generate_json(
-        "Return JSON with: name (string), founded (int), is_public (bool). "
-        "Company: OpenAI"
+    # Structured JSON — returns a validated Pydantic instance
+    company = await client.generate_json(
+        "Company: OpenAI. Return name, founding year, and whether it's public.",
+        response_model=Company,
     )
-    print(data)  # {'name': 'OpenAI', 'founded': 2015, 'is_public': False}
+    print(company.name, company.founded)   # OpenAI 2015
+
+    # Token utilities
+    n = client.count_tokens("some text")
+    chunks = client.chunk_text(long_text, max_tokens=500)
 
 asyncio.run(main())
 ```
@@ -345,13 +365,16 @@ asyncio.run(main())
 ### CrawlEngine — Fetch pages programmatically
 
 ```python
+from config import Settings
 from crawler.engine import CrawlEngine
 
-async with CrawlEngine() as engine:
+# Pass a CrawlConfig object (uses rotating UAs, respects config)
+async with CrawlEngine(Settings().crawl) as engine:
     page = await engine.fetch("https://example.com")
     print(page.markdown)       # extracted text
     print(page.links)          # list of absolute URLs
     print(page.content_hash)   # SHA-256 of content
+    print(page.status_code)    # HTTP status (200 for crawl4ai/playwright paths)
 
     allowed = await engine.is_allowed("https://example.com/path")
     print(allowed)             # True / False (robots.txt)
