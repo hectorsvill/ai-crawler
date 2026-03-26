@@ -1,0 +1,37 @@
+<!-- partials/page_card.html — single page row for session detail table -->
+{% set p = page %}
+<tr class="hover:bg-surface-hover/40 transition-colors">
+  <td class="px-3 py-2 font-mono text-gray-600 text-xs">{{ loop.index }}</td>
+  <td class="px-3 py-2 max-w-xs">
+    <a href="{{ p.url }}" target="_blank"
+       class="text-cyan-electric/80 hover:text-cyan-electric font-mono text-xs truncate block"
+       title="{{ p.url }}">{{ p.url|truncate(60, true) }}</a>
+    {% if p.title %}<span class="text-gray-500 text-xs">{{ p.title|truncate(50) }}</span>{% endif %}
+  </td>
+  <td class="px-3 py-2 w-28">
+    {% set score = p.relevance_score or 0 %}
+    <div class="flex items-center gap-2">
+      <div class="flex-1 h-1 bg-gray-800 rounded-full overflow-hidden">
+        <div class="relevance-bar h-full" style="width:{{ (score*100)|int }}%"></div>
+      </div>
+      <span class="font-mono text-gray-400 text-xs w-8 text-right">{{ "%.2f"|format(score) }}</span>
+    </div>
+  </td>
+  <td class="px-3 py-2 text-xs">
+    {% if p.extraction_count %}
+    <span class="conf-badge border-green-ok/40 text-green-ok bg-green-ok/10">
+      ✓ {{ "%.2f"|format(p.max_confidence or 0) }}
+    </span>
+    {% else %}
+    <span class="text-gray-700">—</span>
+    {% endif %}
+  </td>
+  <td class="px-3 py-2 font-mono text-gray-600 text-xs">{{ p.fetch_method or '—' }}</td>
+  <td class="px-3 py-2 font-mono text-gray-500 text-xs">{{ p.depth }}</td>
+  <td class="px-3 py-2 text-xs">
+    {% if p.status == 'done' %}<span class="text-green-ok/70">✓</span>
+    {% elif p.status == 'failed' %}<span class="text-red-err/70">✗</span>
+    {% elif p.status == 'pending' %}<span class="text-amber-warn/70">…</span>
+    {% else %}<span class="text-gray-600">{{ p.status }}</span>{% endif %}
+  </td>
+</tr>

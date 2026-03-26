@@ -1,0 +1,141 @@
+{% extends "base.html" %}
+{% block title %}New Crawl — AI Crawler{% endblock %}
+
+{% block content %}
+
+<div class="max-w-2xl">
+  <h1 class="text-lg font-semibold text-gray-100 mb-6">Launch a New Crawl</h1>
+
+  <form id="crawl-form"
+        hx-post="/api/crawl"
+        hx-target="#form-result"
+        hx-swap="innerHTML"
+        class="space-y-5">
+
+    <!-- Goal -->
+    <div>
+      <label class="block text-sm text-gray-400 mb-1.5">
+        Goal <span class="text-red-err">*</span>
+      </label>
+      <textarea name="goal" id="goal-input" rows="3" required
+                placeholder="What do you want to extract or research? E.g. 'Extract all product prices from example.com'"
+                class="w-full px-4 py-3 bg-surface border border-gray-700 rounded text-sm text-gray-100
+                       placeholder-gray-600 focus:outline-none focus:border-cyan-electric/50 resize-none
+                       transition-colors font-sans"></textarea>
+      <!-- Goal analysis -->
+      <div class="mt-2">
+        <button type="button"
+                hx-post="/crawl/analyze"
+                hx-include="#goal-input"
+                hx-target="#goal-analysis"
+                hx-swap="innerHTML"
+                class="text-xs text-gray-500 hover:text-cyan-electric transition-colors">
+          ⚡ Analyse goal (router preview)
+          <span class="htmx-indicator ml-1 text-gray-600">…</span>
+        </button>
+        <div id="goal-analysis" class="mt-2"></div>
+      </div>
+    </div>
+
+    <!-- Start URL -->
+    <div>
+      <label class="block text-sm text-gray-400 mb-1.5">
+        Start URL <span class="text-red-err">*</span>
+      </label>
+      <input type="url" name="start_url" required
+             placeholder="https://example.com"
+             class="w-full px-4 py-2.5 bg-surface border border-gray-700 rounded text-sm text-gray-100
+                    font-mono placeholder-gray-600 focus:outline-none focus:border-cyan-electric/50 transition-colors">
+    </div>
+
+    <!-- Workflow + limits row -->
+    <div class="grid grid-cols-3 gap-4">
+      <div>
+        <label class="block text-sm text-gray-400 mb-1.5">Workflow</label>
+        <select name="workflow"
+                class="w-full px-3 py-2.5 bg-surface border border-gray-700 rounded text-sm text-gray-100
+                       focus:outline-none focus:border-cyan-electric/50 transition-colors">
+          <option value="auto">Auto (router decides)</option>
+          <option value="simple">Simple</option>
+          <option value="langgraph">LangGraph</option>
+          <option value="crewai">CrewAI</option>
+        </select>
+      </div>
+      <div>
+        <label class="block text-sm text-gray-400 mb-1.5">Max Pages</label>
+        <input type="number" name="max_pages" min="1" max="5000"
+               value="{{ config.crawl.max_pages }}"
+               class="w-full px-3 py-2.5 bg-surface border border-gray-700 rounded text-sm text-gray-100
+                      font-mono focus:outline-none focus:border-cyan-electric/50 transition-colors">
+      </div>
+      <div>
+        <label class="block text-sm text-gray-400 mb-1.5">Max Depth</label>
+        <input type="number" name="max_depth" min="1" max="20"
+               value="{{ config.crawl.max_depth }}"
+               class="w-full px-3 py-2.5 bg-surface border border-gray-700 rounded text-sm text-gray-100
+                      font-mono focus:outline-none focus:border-cyan-electric/50 transition-colors">
+      </div>
+    </div>
+
+    <!-- Model overrides -->
+    <div class="grid grid-cols-2 gap-4">
+      <div>
+        <label class="block text-sm text-gray-400 mb-1.5">Navigator Model</label>
+        <select name="navigator_model"
+                class="w-full px-3 py-2.5 bg-surface border border-gray-700 rounded text-sm text-gray-100
+                       font-mono focus:outline-none focus:border-cyan-electric/50 transition-colors">
+          {% for m in models %}
+          <option value="{{ m }}" {% if m == default_nav_model %}selected{% endif %}>{{ m }}</option>
+          {% endfor %}
+        </select>
+      </div>
+      <div>
+        <label class="block text-sm text-gray-400 mb-1.5">Extractor Model</label>
+        <select name="extractor_model"
+                class="w-full px-3 py-2.5 bg-surface border border-gray-700 rounded text-sm text-gray-100
+                       font-mono focus:outline-none focus:border-cyan-electric/50 transition-colors">
+          {% for m in models %}
+          <option value="{{ m }}" {% if m == default_ext_model %}selected{% endif %}>{{ m }}</option>
+          {% endfor %}
+        </select>
+      </div>
+    </div>
+
+    <!-- Submit -->
+    <div class="flex items-center gap-3 pt-2">
+      <button type="submit"
+              class="px-6 py-2.5 bg-cyan-electric/10 hover:bg-cyan-electric/20 border border-cyan-electric/50
+                     text-cyan-electric text-sm font-medium rounded transition-colors flex items-center gap-2">
+        <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+          <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13 10V3L4 14h7v7l9-11h-7z"/>
+        </svg>
+        Start Crawl
+        <span class="htmx-indicator text-xs text-cyan-electric/50 ml-1">Launching…</span>
+      </button>
+      <a href="/" class="text-sm text-gray-500 hover:text-gray-300 transition-colors">Cancel</a>
+    </div>
+  </form>
+
+  <!-- Result / redirect -->
+  <div id="form-result" class="mt-4"></div>
+</div>
+
+{% endblock %}
+
+{% block extra_scripts %}
+<script>
+// When API returns session_id, redirect to session detail
+document.getElementById('crawl-form').addEventListener('htmx:afterRequest', function(e) {
+  try {
+    const data = JSON.parse(e.detail.xhr.responseText);
+    if (data.session_id) {
+      document.getElementById('form-result').innerHTML =
+        `<div class="p-3 rounded border border-green-ok/30 bg-green-ok/5 text-green-ok text-sm font-mono">
+           Crawl started! <a href="/session/${data.session_id}" class="underline">View progress →</a>
+         </div>`;
+      setTimeout(() => { window.location = '/session/' + data.session_id; }, 1200);
+    }
+  } catch(e) {}
+});
+</script>
+{% endblock %}

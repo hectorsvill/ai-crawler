@@ -1,0 +1,167 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>{% block title %}AI Crawler{% endblock %}</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link href="https://fonts.googleapis.com/css2?family=DM+Sans:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+  <script src="https://cdn.tailwindcss.com"></script>
+  <script>
+    tailwind.config = {
+      theme: {
+        extend: {
+          colors: {
+            surface: '#12121a',
+            'surface-hover': '#1a1a2e',
+            sidebar: '#0e0e16',
+            cyan: { electric: '#00e5ff' },
+            green: { ok: '#00e676' },
+            red:   { err: '#ff1744' },
+            amber: { warn: '#ffab00' },
+          },
+          fontFamily: {
+            mono: ['"JetBrains Mono"', 'monospace'],
+            sans: ['"DM Sans"', 'sans-serif'],
+          },
+        }
+      }
+    }
+  </script>
+  <script src="https://unpkg.com/htmx.org@2.0.0/dist/htmx.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/alpinejs@3.x.x/dist/cdn.min.js" defer></script>
+  <link rel="stylesheet" href="/static/crawler.css">
+  {% block extra_head %}{% endblock %}
+</head>
+<body class="bg-[#0a0a0f] text-gray-200 font-sans antialiased">
+
+<div class="flex h-screen overflow-hidden">
+
+  <!-- Sidebar -->
+  <nav class="w-52 bg-sidebar border-r border-gray-800 flex flex-col flex-shrink-0">
+    <!-- Logo -->
+    <div class="px-4 py-4 border-b border-gray-800">
+      <div class="flex items-center gap-2">
+        <div class="w-6 h-6 rounded bg-cyan-electric/20 flex items-center justify-center">
+          <svg class="w-4 h-4 text-cyan-electric" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
+              d="M13 10V3L4 14h7v7l9-11h-7z"/>
+          </svg>
+        </div>
+        <span class="text-sm font-semibold text-gray-100">AI Crawler</span>
+      </div>
+    </div>
+
+    <!-- Nav items -->
+    <div class="flex-1 py-3 space-y-0.5 px-2">
+      {% set current = request.url.path %}
+
+      <a href="/"
+         class="flex items-center gap-3 px-3 py-2 rounded text-sm transition-colors
+                {% if current == '/' %}nav-item-active{% else %}text-gray-400 hover:text-gray-100 hover:bg-surface-hover{% endif %}">
+        <svg class="w-4 h-4 flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+          <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
+            d="M3 12l2-2m0 0l7-7 7 7M5 10v10a1 1 0 001 1h3m10-11l2 2m-2-2v10a1 1 0 01-1 1h-3m-6 0a1 1 0 001-1v-4a1 1 0 011-1h2a1 1 0 011 1v4a1 1 0 001 1m-6 0h6"/>
+        </svg>
+        Dashboard
+      </a>
+
+      <a href="/search"
+         class="flex items-center gap-3 px-3 py-2 rounded text-sm transition-colors
+                {% if current.startswith('/search') %}nav-item-active{% else %}text-gray-400 hover:text-gray-100 hover:bg-surface-hover{% endif %}">
+        <svg class="w-4 h-4 flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+          <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
+            d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z"/>
+        </svg>
+        Search
+      </a>
+
+      <a href="/crawl/new"
+         class="flex items-center gap-3 px-3 py-2 rounded text-sm transition-colors
+                {% if current == '/crawl/new' %}nav-item-active{% else %}text-gray-400 hover:text-gray-100 hover:bg-surface-hover{% endif %}">
+        <svg class="w-4 h-4 flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+          <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
+            d="M12 4v16m8-8H4"/>
+        </svg>
+        New Crawl
+      </a>
+    </div>
+
+    <!-- Bottom status -->
+    <div class="px-4 py-3 border-t border-gray-800">
+      <div id="sidebar-status"
+           hx-get="/partials/stats"
+           hx-trigger="every 15s"
+           hx-swap="none"
+           hx-on="htmx:afterRequest: updateSidebarStatus(event)">
+      </div>
+      <p class="text-xs text-gray-600 font-mono">
+        <a href="http://localhost:11434" target="_blank" class="hover:text-gray-400">Ollama ↗</a>
+      </p>
+    </div>
+  </nav>
+
+  <!-- Main content -->
+  <main class="flex-1 overflow-y-auto">
+    <div class="max-w-screen-2xl mx-auto px-6 py-5">
+      {% block content %}{% endblock %}
+    </div>
+  </main>
+
+</div>
+
+<script>
+  // Simple JSON syntax highlighter
+  function highlightJSON(json) {
+    if (typeof json !== 'string') {
+      json = JSON.stringify(json, null, 2);
+    }
+    return json
+      .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
+      .replace(/("(\\u[a-zA-Z0-9]{4}|\\[^u]|[^\\"])*"(\s*:)?|\b(true|false|null)\b|-?\d+(?:\.\d*)?(?:[eE][+\-]?\d+)?)/g, function(match) {
+        let cls = 'json-num';
+        if (/^"/.test(match)) {
+          cls = /:$/.test(match) ? 'json-key' : 'json-str';
+        } else if (/true|false/.test(match)) {
+          cls = 'json-bool';
+        } else if (/null/.test(match)) {
+          cls = 'json-null';
+        }
+        return '<span class="' + cls + '">' + match + '</span>';
+      });
+  }
+
+  // Render all .json-block elements
+  document.addEventListener('DOMContentLoaded', function() {
+    document.querySelectorAll('.json-block[data-json]').forEach(el => {
+      try {
+        const obj = JSON.parse(el.dataset.json);
+        el.innerHTML = highlightJSON(JSON.stringify(obj, null, 2));
+      } catch(e) {
+        el.textContent = el.dataset.json;
+      }
+    });
+  });
+
+  // Copy to clipboard helper
+  function copyText(text) {
+    navigator.clipboard.writeText(text).then(() => {
+      const toast = document.getElementById('copy-toast');
+      if (toast) { toast.classList.remove('opacity-0'); setTimeout(() => toast.classList.add('opacity-0'), 1500); }
+    });
+  }
+
+  // htmx config
+  htmx.config.defaultSwapStyle = 'innerHTML';
+</script>
+
+<!-- Copy toast -->
+<div id="copy-toast"
+     class="fixed bottom-6 right-6 bg-green-ok/20 border border-green-ok/40 text-green-ok
+            text-sm font-mono px-4 py-2 rounded transition-opacity duration-300 opacity-0 pointer-events-none">
+  Copied!
+</div>
+
+{% block extra_scripts %}{% endblock %}
+</body>
+</html>

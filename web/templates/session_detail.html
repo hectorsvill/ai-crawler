@@ -1,0 +1,376 @@
+{% extends "base.html" %}
+{% block title %}Session {{ session.id[:12] }} — AI Crawler{% endblock %}
+
+{% block content %}
+
+<!-- Breadcrumb -->
+<nav class="text-xs text-gray-600 font-mono mb-4">
+  <a href="/" class="hover:text-gray-400">dashboard</a>
+  <span class="mx-2">/</span>
+  <span class="text-gray-400">{{ session.id[:16] }}</span>
+</nav>
+
+<!-- Header -->
+<div class="bg-surface rounded-lg border border-gray-800 p-5 mb-5">
+  <div class="flex items-start justify-between gap-4">
+    <div class="flex-1 min-w-0">
+      <h1 class="text-base font-semibold text-gray-100 mb-1">{{ session.goal }}</h1>
+      <div class="flex flex-wrap items-center gap-4 text-xs text-gray-500 font-mono">
+        <span>{{ session.id }}</span>
+        <span>Workflow: <span class="text-gray-300">{{ session.workflow_used }}</span></span>
+        <span>Started:
+          <span class="text-gray-300">
+            {% if session.started_at %}{{ session.started_at.strftime('%Y-%m-%d %H:%M:%S') }}{% else %}—{% endif %}
+          </span>
+        </span>
+        {% if session.ended_at %}
+        <span>Ended: <span class="text-gray-300">{{ session.ended_at.strftime('%Y-%m-%d %H:%M:%S') }}</span></span>
+        {% endif %}
+        <span>Duration: <span class="text-gray-300">{{ duration }}</span></span>
+      </div>
+      {% if session.start_urls %}
+      <div class="mt-2 flex flex-wrap gap-2">
+        {% for url in session.start_urls %}
+        <a href="{{ url }}" target="_blank"
+           class="text-xs font-mono text-cyan-electric/70 hover:text-cyan-electric truncate max-w-xs">
+          {{ url }}↗
+        </a>
+        {% endfor %}
+      </div>
+      {% endif %}
+    </div>
+
+    <!-- Status + actions -->
+    <div class="flex items-center gap-3 flex-shrink-0">
+      {% if session.status == 'running' %}
+        <span class="status-running text-green-ok text-xs font-mono">running</span>
+        <form method="post" action="/api/crawl/{{ session.id }}/stop">
+          <button type="submit"
+                  class="px-3 py-1.5 text-xs bg-red-err/10 border border-red-err/30 text-red-err rounded hover:bg-red-err/20 transition-colors">
+            Stop
+          </button>
+        </form>
+      {% elif session.status == 'completed' %}
+        <span class="text-cyan-electric text-xs font-mono flex items-center gap-1.5">
+          <span class="w-2 h-2 rounded-full bg-cyan-electric"></span>completed
+        </span>
+      {% elif session.status == 'failed' %}
+        <span class="text-red-err text-xs font-mono flex items-center gap-1.5">
+          <span class="w-2 h-2 rounded-full bg-red-err"></span>failed
+        </span>
+      {% else %}
+        <span class="text-amber-warn text-xs font-mono flex items-center gap-1.5">
+          <span class="w-2 h-2 rounded-full bg-amber-warn"></span>{{ session.status }}
+        </span>
+      {% endif %}
+
+      <a href="/api/sessions/{{ session.id }}/export"
+         class="px-3 py-1.5 text-xs bg-surface-hover border border-gray-700 text-gray-300 rounded hover:text-gray-100 transition-colors">
+        Export JSON
+      </a>
+      <a href="/api/sessions/{{ session.id }}/export?format=csv"
+         class="px-3 py-1.5 text-xs bg-surface-hover border border-gray-700 text-gray-300 rounded hover:text-gray-100 transition-colors">
+        Export CSV
+      </a>
+    </div>
+  </div>
+</div>
+
+<!-- Stats cards -->
+<div class="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-6 gap-3 mb-5">
+  {% for label, value, color in [
+    ('Pages Done',   stats.pages_done,     'text-green-ok'),
+    ('Failed',       stats.pages_failed,   'text-red-err'),
+    ('Pending',      stats.pages_pending,  'text-amber-warn'),
+    ('Extractions',  stats.extractions,    'text-cyan-electric'),
+    ('Avg Conf.',    "%.2f"|format(stats.avg_confidence), 'text-purple-400'),
+    ('Duration',     duration,             'text-gray-300'),
+  ] %}
+  <div class="bg-surface rounded border border-gray-800 px-4 py-3">
+    <p class="text-xs text-gray-500 uppercase tracking-wider">{{ label }}</p>
+    <p class="text-xl font-mono font-semibold mt-1 {{ color }}">{{ value }}</p>
+  </div>
+  {% endfor %}
+</div>
+
+<!-- Live progress banner (only when running) -->
+{% if is_running %}
+<div id="live-banner"
+     class="mb-5 p-3 rounded border border-green-ok/30 bg-green-ok/5 text-xs text-green-ok font-mono flex items-center gap-2">
+  <span class="status-running"></span>
+  <span id="live-status-text">Crawl in progress — updates live</span>
+</div>
+{% endif %}
+
+<!-- Tabs -->
+<div x-data="{ tab: 'pages' }" class="space-y-0">
+  <div class="flex gap-0 border-b border-gray-800 mb-4">
+    {% for tid, tlabel in [('pages','Pages'), ('extractions','Extractions'), ('logs','Logs'), ('tree','Crawl Tree')] %}
+    <button @click="tab='{{ tid }}'"
+            :class="tab==='{{ tid }}' ? 'border-b-2 border-cyan-electric text-cyan-electric' : 'text-gray-500 hover:text-gray-300'"
+            class="px-4 py-2.5 text-sm font-medium transition-colors">
+      {{ tlabel }}
+      {% if tid == 'pages' %}
+        <span class="ml-1 text-xs font-mono text-gray-600">{{ pages|length }}</span>
+      {% elif tid == 'extractions' %}
+        <span class="ml-1 text-xs font-mono text-gray-600">{{ extractions|length }}</span>
+      {% elif tid == 'logs' %}
+        <span class="ml-1 text-xs font-mono text-gray-600">{{ logs|length }}</span>
+      {% endif %}
+    </button>
+    {% endfor %}
+  </div>
+
+  <!-- Pages tab -->
+  <div x-show="tab==='pages'">
+    <div class="bg-surface rounded-lg border border-gray-800 overflow-hidden">
+      {% if pages %}
+      <table class="w-full text-xs">
+        <thead>
+          <tr class="border-b border-gray-800 text-gray-500 uppercase tracking-wider">
+            <th class="px-3 py-2.5 text-left">#</th>
+            <th class="px-3 py-2.5 text-left">URL</th>
+            <th class="px-3 py-2.5 text-left">Relevance</th>
+            <th class="px-3 py-2.5 text-left">Extraction</th>
+            <th class="px-3 py-2.5 text-left">Method</th>
+            <th class="px-3 py-2.5 text-left">Depth</th>
+            <th class="px-3 py-2.5 text-left">Status</th>
+          </tr>
+        </thead>
+        <tbody class="divide-y divide-gray-800/50">
+          {% for p in pages %}
+          <tr class="hover:bg-surface-hover/40 transition-colors">
+            <td class="px-3 py-2 font-mono text-gray-600">{{ loop.index }}</td>
+            <td class="px-3 py-2 max-w-xs">
+              <a href="{{ p.url }}" target="_blank"
+                 class="text-cyan-electric/80 hover:text-cyan-electric font-mono truncate block" title="{{ p.url }}">
+                {{ p.url|truncate(60, true) }}
+              </a>
+              {% if p.title %}
+              <span class="text-gray-500 text-xs">{{ p.title|truncate(50) }}</span>
+              {% endif %}
+            </td>
+            <td class="px-3 py-2 w-28">
+              {% set score = p.relevance_score or 0 %}
+              <div class="flex items-center gap-2">
+                <div class="flex-1 h-1 bg-gray-800 rounded-full overflow-hidden">
+                  <div class="relevance-bar h-full" style="width:{{ (score*100)|int }}%"></div>
+                </div>
+                <span class="font-mono text-gray-400 w-8 text-right">{{ "%.2f"|format(score) }}</span>
+              </div>
+            </td>
+            <td class="px-3 py-2">
+              {% if p.extraction_count %}
+              <span class="conf-badge border-green-ok/40 text-green-ok bg-green-ok/10">
+                ✓ {{ "%.2f"|format(p.max_confidence or 0) }}
+              </span>
+              {% else %}
+              <span class="text-gray-700">—</span>
+              {% endif %}
+            </td>
+            <td class="px-3 py-2 font-mono text-gray-600">{{ p.fetch_method or '—' }}</td>
+            <td class="px-3 py-2 font-mono text-gray-500">{{ p.depth }}</td>
+            <td class="px-3 py-2">
+              {% if p.status == 'done' %}
+                <span class="text-green-ok/70">✓</span>
+              {% elif p.status == 'failed' %}
+                <span class="text-red-err/70">✗</span>
+              {% elif p.status == 'pending' %}
+                <span class="text-amber-warn/70">…</span>
+              {% else %}
+                <span class="text-gray-600">{{ p.status }}</span>
+              {% endif %}
+            </td>
+          </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+      {% else %}
+      <div class="py-12 text-center text-gray-500 text-sm">No pages recorded for this session.</div>
+      {% endif %}
+    </div>
+  </div>
+
+  <!-- Extractions tab -->
+  <div x-show="tab==='extractions'" class="space-y-3">
+    {% if extractions %}
+    {% for e in extractions %}
+    <div class="bg-surface rounded-lg border border-gray-800 p-4">
+      <div class="flex items-start justify-between gap-4 mb-3">
+        <div class="min-w-0">
+          <a href="{{ e.url or '#' }}" target="_blank"
+             class="text-xs font-mono text-cyan-electric/80 hover:text-cyan-electric truncate block">
+            {{ e.url or '—' }}
+          </a>
+          {% if e.title %}
+          <p class="text-sm text-gray-300 mt-0.5">{{ e.title }}</p>
+          {% endif %}
+          <div class="flex items-center gap-3 mt-1">
+            {% if e.schema_used %}
+            <span class="text-xs font-mono text-gray-600">schema: {{ e.schema_used[:40] }}</span>
+            {% endif %}
+            <span class="conf-badge border-cyan-electric/30 text-cyan-electric bg-cyan-electric/5">
+              conf {{ "%.2f"|format(e.confidence) }}
+            </span>
+          </div>
+        </div>
+        <button onclick="copyText(JSON.stringify({{ e.data | tojson }}, null, 2))"
+                class="text-xs text-gray-500 hover:text-gray-300 flex-shrink-0">Copy</button>
+      </div>
+      <pre class="json-block bg-[#0a0a0f] rounded p-3 overflow-x-auto text-xs"
+           data-json="{{ e.data | tojson }}"></pre>
+    </div>
+    {% endfor %}
+    {% else %}
+    <div class="bg-surface rounded-lg border border-gray-800 py-12 text-center text-gray-500 text-sm">
+      No extractions for this session.
+    </div>
+    {% endif %}
+  </div>
+
+  <!-- Logs tab -->
+  <div x-show="tab==='logs'">
+    <div class="bg-surface rounded-lg border border-gray-800">
+      {% if logs %}
+      <div class="log-panel p-2 space-y-px" id="logs-panel">
+        {% for log in logs|reverse %}
+        <div class="flex items-start gap-3 px-3 py-1.5 rounded hover:bg-surface-hover/50">
+          <span class="font-mono text-xs text-gray-600 flex-shrink-0 w-20">
+            {{ log.timestamp[11:19] if log.timestamp else '' }}
+          </span>
+          <span class="font-mono text-xs flex-shrink-0 w-16
+            {% if log.level == 'error' %}text-red-err
+            {% elif log.level == 'warning' %}text-amber-warn
+            {% elif log.level == 'info' %}text-cyan-electric/70
+            {% else %}text-gray-500{% endif %}">
+            {{ log.level }}
+          </span>
+          <span class="font-mono text-xs text-gray-600 flex-shrink-0 w-20">{{ log.component }}</span>
+          <span class="text-xs text-gray-300 flex-1">{{ log.message }}</span>
+        </div>
+        {% endfor %}
+      </div>
+      {% else %}
+      <div class="py-12 text-center text-gray-500 text-sm">
+        No logs for this session. Logs are recorded for web-launched crawls.
+      </div>
+      {% endif %}
+    </div>
+  </div>
+
+  <!-- Tree tab -->
+  <div x-show="tab==='tree'">
+    <div class="bg-surface rounded-lg border border-gray-800 p-4"
+         hx-get="/api/sessions/{{ session.id }}/tree"
+         hx-trigger="intersect once"
+         hx-swap="innerHTML"
+         hx-target="#tree-container">
+      <div id="tree-container" class="text-sm text-gray-400">
+        <span class="htmx-indicator">Loading tree…</span>
+      </div>
+    </div>
+  </div>
+
+</div>
+
+{% endblock %}
+
+{% block extra_scripts %}
+{% if is_running %}
+<script>
+(function() {
+  const sessionId = "{{ session.id }}";
+  const es = new EventSource('/api/live/' + sessionId);
+  const statusText = document.getElementById('live-status-text');
+  const logsPanel = document.getElementById('logs-panel');
+
+  es.onmessage = function(e) {
+    const data = JSON.parse(e.data);
+    if (statusText && data.stats) {
+      const s = data.stats;
+      statusText.textContent = `Pages: ${s.pages_crawled||0} | Extractions: ${s.extractions||0} | Queue: ${s.queue_size||0}`;
+    }
+    if (logsPanel && data.logs && data.logs.length) {
+      data.logs.forEach(log => {
+        const row = document.createElement('div');
+        row.className = 'flex items-start gap-3 px-3 py-1.5 rounded hover:bg-surface-hover/50';
+        const ts = (log.timestamp||'').slice(11,19);
+        const lvlCls = {error:'text-red-err', warning:'text-amber-warn', info:'text-cyan-electric/70'}[log.level]||'text-gray-500';
+        row.innerHTML = `
+          <span class="font-mono text-xs text-gray-600 flex-shrink-0 w-20">${ts}</span>
+          <span class="font-mono text-xs flex-shrink-0 w-16 ${lvlCls}">${log.level}</span>
+          <span class="font-mono text-xs text-gray-600 flex-shrink-0 w-20">${log.component||''}</span>
+          <span class="text-xs text-gray-300 flex-1">${log.message}</span>`;
+        logsPanel.appendChild(row);
+        logsPanel.scrollTop = logsPanel.scrollHeight;
+      });
+    }
+  };
+
+  es.addEventListener('done', function(e) {
+    es.close();
+    const data = JSON.parse(e.data);
+    const banner = document.getElementById('live-banner');
+    if (banner) {
+      banner.className = banner.className.replace('border-green-ok/30 bg-green-ok/5 text-green-ok',
+        'border-cyan-electric/30 bg-cyan-electric/5 text-cyan-electric');
+      banner.innerHTML = `<span>Crawl ${data.status}. <a href="" class="underline">Refresh</a> to see final data.</span>`;
+    }
+  });
+
+  es.onerror = function() { es.close(); };
+})();
+</script>
+{% endif %}
+
+<script>
+// Render extraction JSON blocks
+document.querySelectorAll('.json-block[data-json]').forEach(el => {
+  try {
+    const obj = JSON.parse(el.dataset.json);
+    el.innerHTML = highlightJSON(JSON.stringify(obj, null, 2));
+  } catch(e) { el.textContent = el.dataset.json; }
+});
+
+// Render tree data from HTMX
+document.body.addEventListener('htmx:afterSwap', function(e) {
+  if (e.target && e.target.id === 'tree-container') {
+    renderTree(e.detail.xhr);
+  }
+});
+
+function renderTree(xhr) {
+  const container = document.getElementById('tree-container');
+  if (!container) return;
+  let data;
+  try { data = JSON.parse(xhr.responseText); } catch(e) { return; }
+  if (!data || !data.tree) return;
+  container.innerHTML = buildTreeHTML(data.tree, 0);
+}
+
+function buildTreeHTML(nodes, depth) {
+  if (!nodes || nodes.length === 0) return '';
+  let html = '<ul class="space-y-1 ' + (depth > 0 ? 'ml-5 border-l border-gray-800 pl-3' : '') + '">';
+  nodes.forEach(node => {
+    const score = node.relevance || 0;
+    const scoreColor = score >= 0.7 ? 'text-green-ok' : score >= 0.4 ? 'text-amber-warn' : 'text-red-err/70';
+    const statusIcon = node.status === 'done' ? '✓' : node.status === 'failed' ? '✗' : '…';
+    const domain = node.url.includes('://') ? node.url.split('/').slice(0,3).join('/') : node.url;
+    html += `<li class="tree-node">
+      <details class="group">
+        <summary class="flex items-center gap-2 cursor-pointer list-none py-1 hover:text-gray-100 text-gray-400">
+          <span class="text-gray-600">${statusIcon}</span>
+          <a href="${node.url}" target="_blank" class="text-xs font-mono text-cyan-electric/70 hover:text-cyan-electric truncate max-w-md" onclick="event.stopPropagation()">
+            ${node.url.slice(0, 80)}${node.url.length > 80 ? '…' : ''}
+          </a>
+          <span class="text-xs font-mono ${scoreColor} ml-auto flex-shrink-0">${score.toFixed(2)}</span>
+        </summary>
+        ${node.children && node.children.length ? buildTreeHTML(node.children, depth+1) : ''}
+      </details>
+    </li>`;
+  });
+  html += '</ul>';
+  return html;
+}
+</script>
+{% endblock %}

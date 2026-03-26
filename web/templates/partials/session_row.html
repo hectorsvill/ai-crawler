@@ -1,0 +1,51 @@
+<!-- partials/session_row.html — single session table row (HTMX swap target) -->
+{% set s = session %}
+<tr class="session-row hover:bg-surface-hover/50 transition-colors"
+    onclick="window.location='/session/{{ s.id }}'">
+  <td class="px-4 py-3">
+    {% if s.status == 'running' %}
+      <span class="status-running text-green-ok text-xs font-mono">running</span>
+    {% elif s.status == 'completed' %}
+      <span class="inline-flex items-center gap-1.5 text-cyan-electric text-xs font-mono">
+        <span class="w-2 h-2 rounded-full bg-cyan-electric"></span>done
+      </span>
+    {% elif s.status == 'failed' %}
+      <span class="inline-flex items-center gap-1.5 text-red-err text-xs font-mono">
+        <span class="w-2 h-2 rounded-full bg-red-err"></span>failed
+      </span>
+    {% else %}
+      <span class="inline-flex items-center gap-1.5 text-amber-warn text-xs font-mono">
+        <span class="w-2 h-2 rounded-full bg-amber-warn"></span>{{ s.status }}
+      </span>
+    {% endif %}
+  </td>
+  <td class="px-4 py-3 max-w-xs">
+    <span class="block truncate text-gray-200" title="{{ s.goal }}">{{ s.goal }}</span>
+    <span class="text-xs font-mono text-gray-600">{{ s.id[:12] }}…</span>
+  </td>
+  <td class="px-4 py-3">
+    <span class="px-2 py-0.5 text-xs font-mono rounded border
+      {% if s.workflow_used == 'simple' %}text-cyan-400 border-cyan-800 bg-cyan-900/20
+      {% elif s.workflow_used == 'langgraph' %}text-purple-400 border-purple-800 bg-purple-900/20
+      {% else %}text-amber-400 border-amber-800 bg-amber-900/20{% endif %}">
+      {{ s.workflow_used }}
+    </span>
+  </td>
+  <td class="px-4 py-3 text-right font-mono text-gray-300">{{ s.pages_crawled }}</td>
+  <td class="px-4 py-3 text-right font-mono text-gray-300">{{ s.extractions }}</td>
+  <td class="px-4 py-3 text-xs text-gray-500 font-mono whitespace-nowrap">
+    {% if s.started_at %}{{ s.started_at.strftime('%m-%d %H:%M') }}{% else %}—{% endif %}
+  </td>
+  <td class="px-4 py-3" onclick="event.stopPropagation()">
+    <div class="flex items-center gap-2">
+      <a href="/session/{{ s.id }}" class="text-xs text-gray-400 hover:text-cyan-electric">View</a>
+      <a href="/api/sessions/{{ s.id }}/export" class="text-xs text-gray-400 hover:text-amber-warn">Export</a>
+      <button
+        hx-delete="/api/sessions/{{ s.id }}"
+        hx-confirm="Delete session {{ s.id[:8] }}?"
+        hx-target="closest tr"
+        hx-swap="outerHTML"
+        class="text-xs text-gray-600 hover:text-red-err">Del</button>
+    </div>
+  </td>
+</tr>

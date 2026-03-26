@@ -605,6 +605,35 @@ def _print_papers_table(papers: list[dict], title: str = "Research Papers") -> N
     console.print(table)
 
 
+# ── Web dashboard command ──────────────────────────────────────────────────────
+
+@app.command()
+def web(
+    host: str = typer.Option("0.0.0.0", "--host", help="Host to bind to."),
+    port: int = typer.Option(8420, "--port", "-p", help="Port to listen on."),
+    config_path: Optional[Path] = typer.Option(None, "--config", "-c", help="Config YAML path."),
+    reload: bool = typer.Option(False, "--reload", help="Enable auto-reload (dev mode)."),
+) -> None:
+    """Launch the web dashboard at http://localhost:8420"""
+    import os
+    import uvicorn
+
+    if config_path:
+        os.environ["CRAWLER_CONFIG"] = str(config_path)
+
+    console.rule("[bold cyan]AI Crawler Dashboard[/bold cyan]")
+    console.print(f"  URL: [cyan]http://{'localhost' if host == '0.0.0.0' else host}:{port}[/cyan]")
+    console.print()
+
+    uvicorn.run(
+        "web.app:app",
+        host=host,
+        port=port,
+        reload=reload,
+        log_level="info",
+    )
+
+
 # ── Entrypoint ─────────────────────────────────────────────────────────────────
 
 def main() -> None:

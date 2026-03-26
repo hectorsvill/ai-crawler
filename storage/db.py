@@ -6,13 +6,14 @@ and content deduplication helpers.
 from __future__ import annotations
 
 import hashlib
+import json
 import logging
 import uuid
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 from typing import AsyncIterator
 
-from sqlalchemy import select, update
+from sqlalchemy import select, text as sa_text, update
 from sqlalchemy.ext.asyncio import (
     AsyncEngine,
     AsyncSession,
@@ -22,6 +23,7 @@ from sqlalchemy.ext.asyncio import (
 
 from storage.models import (
     Base,
+    CrawlLog,
     CrawlSession,
     ExtractedData,
     ExtractionResult,
@@ -160,10 +162,14 @@ async def add_to_queue(
     from utils.url import normalize_url
 
     inserted = 0
+    sid_str = str(session_id) if session_id is not None else None
     for raw_url in urls:
         canonical = normalize_url(raw_url)
         existing = await session.scalar(
-            select(URLRecord).where(URLRecord.url == canonical)
+            select(URLRecord).where(
+                URLRecord.url == canonical,
+                URLRecord.session_id == sid_str,
+            )
         )
         if existing:
             continue
@@ -221,7 +227,10 @@ async def enqueue_url(item: URLItem) -> bool:
 
     async with get_session() as db:
         existing = await db.scalar(
-            select(URLRecord).where(URLRecord.url == item.url)
+            select(URLRecord).where(
+                URLRecord.url == item.url,
+                URLRecord.session_id == item.session_id,
+            )
         )
         if existing:
             return False
@@ -377,3 +386,262 @@ async def get_all_extractions(session_id: str) -> list[dict]:
         )
         records = result.scalars().all()
     return [{"data": r.data, "confidence": r.confidence, "schema": r.schema_used} for r in records]
+
+
+# ── Web dashboard helpers ─────────────────────────────────────────────────────
+
+async def ensure_fts_and_logs(engine: "AsyncEngine") -> None:
+    """
+    Create the full-text search index table and update triggers (idempotent).
+
+    Called once by the web app lifespan on startup. Also initialises the
+    research paper FTS5 table so the web search covers all content types.
+    """
+    from sqlalchemy import text as sa_text
+
+    async with engine.begin() as conn:
+        # search_index: FTS5 table covering page content + extractions
+        await conn.execute(sa_text("""
+            CREATE VIRTUAL TABLE IF NOT EXISTS search_index
+            USING fts5(
+                session_id UNINDEXED,
+                url        UNINDEXED,
+                title,
+                content,
+                tokenize = 'porter ascii'
+            )
+        """))
+
+        # Populate if empty
+        # (populated lazily via populate_search_index on session completion)
+
+    # Also set up research FTS
+    try:
+        from storage.research import init_research_fts
+        await init_research_fts(engine)
+    except Exception:
+        pass
+
+
+async def insert_crawl_log(
+    session_id: str,
+    message: str,
+    component: str = "system",
+    level: str = "info",
+    extra_data: "dict | None" = None,
+) -> None:
+    """Append a log entry to the crawl_logs table for the web activity feed."""
+    try:
+        from storage.models import CrawlLog
+        record = CrawlLog(
+            session_id=session_id,
+            level=level,
+            component=component,
+            message=message[:2048],
+            extra_data=extra_data,
+        )
+        async with get_session() as db:
+            db.add(record)
+    except Exception:
+        pass  # Log writes must never crash the crawler
+
+
+async def get_session_logs(
+    session_id: str,
+    limit: int = 200,
+    offset: int = 0,
+    component: "str | None" = None,
+) -> list[dict]:
+    """Fetch crawl log entries for a session, newest first."""
+    from storage.models import CrawlLog
+    async with get_session() as db:
+        q = (
+            select(CrawlLog)
+            .where(CrawlLog.session_id == session_id)
+            .order_by(CrawlLog.timestamp.desc())
+            .limit(limit)
+            .offset(offset)
+        )
+        if component:
+            q = q.where(CrawlLog.component == component)
+        result = await db.execute(q)
+        records = result.scalars().all()
+    return [
+        {
+            "id": r.id,
+            "timestamp": r.timestamp.isoformat() if r.timestamp else None,
+            "level": r.level,
+            "component": r.component,
+            "message": r.message,
+            "extra_data": r.extra_data,
+        }
+        for r in reversed(records)  # chronological order
+    ]
+
+
+async def get_new_logs_since(session_id: str, last_id: int) -> list[dict]:
+    """Return log entries with id > last_id for SSE live streaming."""
+    from storage.models import CrawlLog
+    async with get_session() as db:
+        result = await db.execute(
+            select(CrawlLog)
+            .where(
+                CrawlLog.session_id == session_id,
+                CrawlLog.id > last_id,
+            )
+            .order_by(CrawlLog.id.asc())
+            .limit(50)
+        )
+        records = result.scalars().all()
+    return [
+        {
+            "id": r.id,
+            "timestamp": r.timestamp.isoformat() if r.timestamp else None,
+            "level": r.level,
+            "component": r.component,
+            "message": r.message,
+        }
+        for r in records
+    ]
+
+
+async def get_recent_activity(limit: int = 50) -> list[dict]:
+    """Return recent log entries across all sessions for the dashboard feed."""
+    from storage.models import CrawlLog
+    async with get_session() as db:
+        result = await db.execute(
+            select(CrawlLog)
+            .order_by(CrawlLog.timestamp.desc())
+            .limit(limit)
+        )
+        records = result.scalars().all()
+    return [
+        {
+            "id": r.id,
+            "session_id": r.session_id,
+            "session_short": r.session_id[:8] if r.session_id else "—",
+            "timestamp": r.timestamp.isoformat() if r.timestamp else None,
+            "level": r.level,
+            "component": r.component,
+            "message": r.message,
+        }
+        for r in records
+    ]
+
+
+async def get_global_stats() -> dict:
+    """Aggregate counts for the dashboard stats bar."""
+    from sqlalchemy import func as sqlfunc
+    async with get_session() as db:
+        total_sessions = await db.scalar(select(sqlfunc.count(CrawlSession.id))) or 0
+        total_pages = await db.scalar(select(sqlfunc.count(VisitedPage.id))) or 0
+        total_extractions = await db.scalar(select(sqlfunc.count(ExtractedData.id))) or 0
+        running = await db.scalar(
+            select(sqlfunc.count(CrawlSession.id)).where(
+                CrawlSession.status == SessionStatus.running
+            )
+        ) or 0
+    return {
+        "total_sessions": total_sessions,
+        "total_pages": total_pages,
+        "total_extractions": total_extractions,
+        "running_crawls": running,
+    }
+
+
+async def populate_search_index(session_id: str) -> int:
+    """
+    Index all visited pages for a session into the FTS5 search_index table.
+
+    Returns the count of rows inserted. Skips already-indexed rows.
+    """
+    from sqlalchemy import text as sa_text
+
+    async with get_session() as db:
+        # Remove old entries for this session first (clean re-index)
+        await db.execute(
+            sa_text("DELETE FROM search_index WHERE session_id = :sid"),
+            {"sid": session_id},
+        )
+
+        # Pull pages that have been visited for this session
+        result = await db.execute(
+            select(VisitedPage)
+            .join(URLRecord, URLRecord.url == VisitedPage.url)
+            .where(URLRecord.session_id == session_id)
+            .where(URLRecord.status == URLStatus.done)
+        )
+        pages = result.scalars().all()
+
+        count = 0
+        for page in pages:
+            content = (page.markdown or page.raw_html or "")[:50_000]
+            await db.execute(
+                sa_text("""
+                    INSERT INTO search_index(session_id, url, title, content)
+                    VALUES (:sid, :url, :title, :content)
+                """),
+                {
+                    "sid": session_id,
+                    "url": page.url,
+                    "title": page.title or "",
+                    "content": content,
+                },
+            )
+            count += 1
+
+    return count
+
+
+async def search_fulltext(
+    query: str,
+    limit: int = 50,
+    session_id_filter: "str | None" = None,
+) -> list[dict]:
+    """
+    Full-text search across the search_index FTS5 table.
+
+    Returns a list of hit dicts: {url, title, snippet, session_id, rank}.
+    """
+    from sqlalchemy import text as sa_text
+
+    # Safe FTS5 query (same logic as storage.research._safe_fts_query)
+    import re
+    if not re.search(r'\b(AND|OR|NOT|NEAR)\b|[*"]', query):
+        tokens = query.split()
+        fts_q = " ".join(f'"{t}"' for t in tokens)
+    else:
+        fts_q = query
+
+    async with get_session() as db:
+        try:
+            if session_id_filter:
+                rows = await db.execute(
+                    sa_text("""
+                        SELECT session_id, url, title,
+                               snippet(search_index, 3, '<mark>', '</mark>', '…', 20) AS snippet,
+                               rank
+                        FROM search_index
+                        WHERE search_index MATCH :q
+                          AND session_id = :sid
+                        ORDER BY rank
+                        LIMIT :lim
+                    """),
+                    {"q": fts_q, "sid": session_id_filter, "lim": limit},
+                )
+            else:
+                rows = await db.execute(
+                    sa_text("""
+                        SELECT session_id, url, title,
+                               snippet(search_index, 3, '<mark>', '</mark>', '…', 20) AS snippet,
+                               rank
+                        FROM search_index
+                        WHERE search_index MATCH :q
+                        ORDER BY rank
+                        LIMIT :lim
+                    """),
+                    {"q": fts_q, "lim": limit},
+                )
+            return [dict(r._mapping) for r in rows]
+        except Exception:
+            return []

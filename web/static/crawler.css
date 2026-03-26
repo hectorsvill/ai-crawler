@@ -1,0 +1,91 @@
+/* crawler.css — Custom styles that complement Tailwind */
+
+/* Smooth HTMX swap transitions */
+.htmx-swapping { opacity: 0; transition: opacity 0.15s ease-in; }
+.htmx-added    { opacity: 0; }
+.htmx-added.htmx-settling { opacity: 1; transition: opacity 0.2s ease-out; }
+
+/* Pulsing status dot */
+@keyframes pulse-dot {
+  0%, 100% { opacity: 1; }
+  50%       { opacity: 0.3; }
+}
+.status-running::before {
+  content: '';
+  display: inline-block;
+  width: 8px; height: 8px;
+  border-radius: 50%;
+  background: #00e676;
+  margin-right: 6px;
+  animation: pulse-dot 1.4s ease-in-out infinite;
+}
+
+/* Relevance score gradient bar */
+.relevance-bar {
+  height: 4px;
+  border-radius: 2px;
+  background: linear-gradient(to right, #ff1744 0%, #ffab00 50%, #00e676 100%);
+}
+
+/* Scrollable log panel with auto-scroll */
+.log-panel {
+  max-height: 400px;
+  overflow-y: auto;
+  scroll-behavior: smooth;
+}
+
+/* Monospace JSON display */
+.json-block {
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 0.75rem;
+  line-height: 1.6;
+  white-space: pre-wrap;
+  word-break: break-all;
+}
+
+/* Syntax highlight JSON keys */
+.json-key   { color: #00e5ff; }
+.json-str   { color: #a5d6a7; }
+.json-num   { color: #ffcc80; }
+.json-bool  { color: #ef9a9a; }
+.json-null  { color: #b0bec5; }
+
+/* Table row hover */
+tr.session-row { cursor: pointer; transition: background 0.1s; }
+tr.session-row:hover td { background: #1a1a2e; }
+
+/* Active nav item */
+.nav-item-active {
+  background: rgba(0,229,255,0.08);
+  border-right: 2px solid #00e5ff;
+  color: #00e5ff;
+}
+
+/* Confidence arc badge */
+.conf-badge {
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 0.7rem;
+  padding: 1px 6px;
+  border-radius: 4px;
+  border: 1px solid;
+}
+
+/* HTMX indicator spinner */
+.htmx-indicator { display: none; }
+.htmx-request .htmx-indicator { display: inline-block; }
+.htmx-request.htmx-indicator  { display: inline-block; }
+
+/* Tree node indent lines */
+.tree-node { position: relative; }
+.tree-node::before {
+  content: '';
+  position: absolute;
+  left: -12px; top: 0; bottom: 0;
+  border-left: 1px solid #2a2a3e;
+}
+
+/* Scrollbar styling */
+::-webkit-scrollbar { width: 6px; height: 6px; }
+::-webkit-scrollbar-track { background: #0e0e16; }
+::-webkit-scrollbar-thumb { background: #2a2a3e; border-radius: 3px; }
+::-webkit-scrollbar-thumb:hover { background: #3a3a5e; }

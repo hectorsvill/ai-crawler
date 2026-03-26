@@ -1,0 +1,49 @@
+<!-- partials/search_hit.html — FTS5 search results list -->
+{% if not hits and query %}
+<div class="py-12 text-center">
+  <p class="text-gray-500 text-sm">No results for <span class="font-mono text-gray-400">"{{ query }}"</span></p>
+</div>
+{% elif not query %}
+<div class="py-12 text-center text-gray-600 text-sm">Type to search across all crawl data.</div>
+{% else %}
+
+<div class="mb-3 text-xs text-gray-600 font-mono">
+  {{ hits|length }} result{% if hits|length != 1 %}s{% endif %} for
+  <span class="text-gray-400">"{{ query }}"</span>
+</div>
+
+<div class="space-y-3">
+  {% for hit in hits %}
+  <div class="bg-surface rounded-lg border border-gray-800 p-4 hover:border-gray-700 transition-colors">
+    <div class="flex items-start justify-between gap-4">
+      <div class="flex-1 min-w-0">
+        <!-- URL -->
+        <a href="{{ hit.url or '#' }}" target="_blank"
+           class="text-sm font-mono text-cyan-electric/80 hover:text-cyan-electric truncate block">
+          {{ hit.url or '—' }}
+        </a>
+        <!-- Title -->
+        {% if hit.title %}
+        <p class="text-sm text-gray-200 mt-0.5">{{ hit.title }}</p>
+        {% endif %}
+        <!-- Snippet with FTS5 highlights -->
+        {% if hit.snippet %}
+        <p class="text-xs text-gray-400 mt-1.5 leading-relaxed">{{ hit.snippet | safe }}</p>
+        {% endif %}
+        <!-- Goal context -->
+        {% if hit.goal %}
+        <p class="text-xs text-gray-600 mt-1">Goal: {{ hit.goal|truncate(80) }}</p>
+        {% endif %}
+      </div>
+      <!-- Session link -->
+      <div class="flex-shrink-0 text-right">
+        <a href="/session/{{ hit.session_id }}"
+           class="text-xs font-mono text-gray-500 hover:text-cyan-electric transition-colors">
+          {{ hit.session_id[:12] if hit.session_id else '—' }}
+        </a>
+      </div>
+    </div>
+  </div>
+  {% endfor %}
+</div>
+{% endif %}

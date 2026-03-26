@@ -1,0 +1,27 @@
+<!-- partials/stats_bar.html — global stats (HTMX auto-refresh target) -->
+<div id="stats-bar" class="grid grid-cols-2 sm:grid-cols-4 lg:grid-cols-5 gap-3 mb-6">
+
+  <div class="bg-surface rounded border border-gray-800 px-4 py-3">
+    <p class="text-xs text-gray-500 uppercase tracking-wider">Sessions</p>
+    <p class="text-2xl font-mono font-semibold text-gray-100 mt-1">{{ stats.total_sessions }}</p>
+  </div>
+
+  <div class="bg-surface rounded border border-gray-800 px-4 py-3">
+    <p class="text-xs text-gray-500 uppercase tracking-wider">Pages Crawled</p>
+    <p class="text-2xl font-mono font-semibold text-gray-100 mt-1">{{ stats.total_pages }}</p>
+  </div>
+
+  <div class="bg-surface rounded border border-gray-800 px-4 py-3">
+    <p class="text-xs text-gray-500 uppercase tracking-wider">Extractions</p>
+    <p class="text-2xl font-mono font-semibold text-cyan-electric mt-1">{{ stats.total_extractions }}</p>
+  </div>
+
+  <div class="bg-surface rounded border border-gray-800 px-4 py-3">
+    <p class="text-xs text-gray-500 uppercase tracking-wider">Running</p>
+    <p class="text-2xl font-mono font-semibold mt-1
+              {% if stats.running_crawls > 0 %}text-green-ok status-running{% else %}text-gray-600{% endif %}">
+      {{ stats.running_crawls }}
+    </p>
+  </div>
+
+</div>

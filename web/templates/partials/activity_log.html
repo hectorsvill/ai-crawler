@@ -1,0 +1,27 @@
+<!-- partials/activity_log.html — recent activity across all sessions -->
+{% if logs %}
+<div class="divide-y divide-gray-800/40 max-h-64 overflow-y-auto log-panel">
+  {% for log in logs %}
+  <div class="flex items-start gap-3 px-4 py-2 hover:bg-surface-hover/30">
+    <span class="font-mono text-xs text-gray-600 flex-shrink-0 w-20 mt-0.5">
+      {{ log.timestamp[11:19] if log.timestamp else '' }}
+    </span>
+    <span class="font-mono text-xs flex-shrink-0 w-14 mt-0.5
+      {% if log.level == 'error' %}text-red-err
+      {% elif log.level == 'warning' %}text-amber-warn
+      {% else %}text-cyan-electric/60{% endif %}">
+      {{ log.level }}
+    </span>
+    <a href="/session/{{ log.session_id }}"
+       class="font-mono text-xs text-gray-600 hover:text-cyan-electric flex-shrink-0 w-24 truncate mt-0.5">
+      {{ log.session_id[:10] if log.session_id else '' }}
+    </a>
+    <span class="text-xs text-gray-400 flex-1">{{ log.message }}</span>
+  </div>
+  {% endfor %}
+</div>
+{% else %}
+<div class="py-8 text-center text-gray-600 text-xs font-mono">
+  No activity yet. Logs appear here once crawls start.
+</div>
+{% endif %}

@@ -1,0 +1,25 @@
+<!-- partials/extraction_card.html — single extraction card -->
+{% set e = extraction %}
+<div class="bg-surface rounded-lg border border-gray-800 p-4">
+  <div class="flex items-start justify-between gap-4 mb-3">
+    <div class="min-w-0">
+      <a href="{{ e.url or '#' }}" target="_blank"
+         class="text-xs font-mono text-cyan-electric/80 hover:text-cyan-electric truncate block">
+        {{ e.url or '—' }}
+      </a>
+      {% if e.title %}<p class="text-sm text-gray-300 mt-0.5">{{ e.title }}</p>{% endif %}
+      <div class="flex items-center gap-3 mt-1">
+        {% if e.schema_used %}
+        <span class="text-xs font-mono text-gray-600">schema: {{ e.schema_used[:40] }}</span>
+        {% endif %}
+        <span class="conf-badge border-cyan-electric/30 text-cyan-electric bg-cyan-electric/5">
+          conf {{ "%.2f"|format(e.confidence) }}
+        </span>
+      </div>
+    </div>
+    <button onclick="copyText(JSON.stringify({{ e.data | tojson }}, null, 2))"
+            class="text-xs text-gray-500 hover:text-gray-300 flex-shrink-0">Copy</button>
+  </div>
+  <pre class="json-block bg-[#0a0a0f] rounded p-3 overflow-x-auto"
+       data-json="{{ e.data | tojson }}"></pre>
+</div>
