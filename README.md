@@ -15,49 +15,67 @@ Supports three workflow modes: **simple**, **LangGraph** (stateful), and **CrewA
 
 ---
 
-## 1. Pull Ollama Models
+## 1. Clone & Install
 
 ```bash
-# Primary extraction model (best quality, ~4GB)
-ollama pull qwen2.5:7b
-
-# Fast navigation model (~1GB)
-ollama pull qwen2.5:1.5b
-
-# Alternative: Microsoft Phi-4 Mini (fast, efficient)
-ollama pull phi4-mini
-
-# Alternative: Llama 3.2 3B (good balance)
-ollama pull llama3.2:3b
-
-# Alternative: Mistral 7B (high quality extraction)
-ollama pull mistral:7b
-
-# Verify Ollama is running
-ollama list
-```
-
----
-
-## 2. Install Dependencies
-
-```bash
+git clone https://github.com/hectorsvill/ai-crawler.git
 cd ai-crawler
 
-# Create a virtual environment (recommended)
+# Create virtual environment
 python3.12 -m venv .venv
 source .venv/bin/activate
 
-# Install Python packages
+# Install Python dependencies
 pip install -r requirements.txt
 
-# Install Playwright browser (for JS-heavy sites)
+# Install Playwright browser (required for JS-heavy sites)
 playwright install chromium
 ```
 
 ---
 
-## 3. Usage Examples
+## 2. Pull Ollama Models
+
+```bash
+# Start Ollama (if not already running)
+ollama serve &
+
+# Required: extraction model (~4GB)
+ollama pull qwen2.5:7b
+
+# Required: fast navigation model (~1GB)
+ollama pull qwen2.5:1.5b
+
+# Verify models are available
+ollama list
+```
+
+**Alternative models** (update `default_config.yaml` to use them):
+
+```bash
+ollama pull phi4-mini      # fast, efficient (~2.5GB)
+ollama pull llama3.2:3b    # good balance (~2GB)
+ollama pull mistral:7b     # high quality extraction (~4.4GB)
+```
+
+---
+
+## 3. Quick Test
+
+```bash
+# Verify everything works — crawls Hacker News and prints top stories
+python main.py crawl \
+  --goal "Get the top 5 stories with titles and scores" \
+  --start-url "https://news.ycombinator.com" \
+  --workflow simple \
+  --max-pages 3
+```
+
+Expected output: a summary table with extracted HN stories and token usage stats.
+
+---
+
+## 4. Usage Examples
 
 ### Research / Knowledge Base Building
 
@@ -127,7 +145,7 @@ python main.py crawl \
 
 ---
 
-## 4. Resuming a Crawl
+## 5. Resuming a Crawl
 
 If a crawl is interrupted, resume it using:
 
@@ -144,7 +162,7 @@ python main.py crawl --goal "..." --start-url "..." --resume
 
 ---
 
-## 5. Exporting Results
+## 6. Exporting Results
 
 ```bash
 # Export all extracted data to JSON
@@ -156,7 +174,7 @@ python main.py export <session-id> --output results.json
 
 ---
 
-## 6. Changing Models
+## 7. Changing Models
 
 Override models per-run via CLI:
 
@@ -178,7 +196,7 @@ ollama:
 
 ---
 
-## 7. Custom Configuration
+## 8. Custom Configuration
 
 Copy and modify the default config:
 
@@ -211,7 +229,7 @@ crawl:
 
 ---
 
-## 8. Architecture Overview
+## 9. Architecture Overview
 
 ```
 Goal → Router → Workflow
@@ -227,7 +245,7 @@ Each workflow uses:
 
 ---
 
-## 9. Environment Variable Overrides
+## 10. Environment Variable Overrides
 
 Override any config setting without modifying YAML:
 
@@ -239,7 +257,7 @@ export CRAWLER_STORAGE__DB_PATH="/data/crawl.db"
 
 ---
 
-## 10. Running the Test Suite
+## 11. Running the Test Suite
 
 Tests require no Ollama instance or network connection — they cover all pure-Python logic.
 
@@ -268,7 +286,7 @@ Test coverage includes:
 
 ---
 
-## 11. Recent Improvements
+## 12. Recent Improvements
 
 | Area | Change |
 |------|--------|
@@ -283,7 +301,7 @@ Test coverage includes:
 
 ---
 
-## 12. Troubleshooting
+## 13. Troubleshooting
 
 **Ollama not responding:**
 ```bash

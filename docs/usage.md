@@ -22,23 +22,47 @@
 
 ## 1. Quick Start
 
+### After cloning (fresh setup)
+
 ```bash
-# 1. Activate the virtual environment
+# 1. Clone the repo
+git clone https://github.com/hectorsvill/ai-crawler.git
+cd ai-crawler
+
+# 2. Create and activate a virtual environment
+python3.12 -m venv .venv
 source .venv/bin/activate
 
-# 2. Make sure Ollama is running with at least one model
-ollama serve &
-ollama pull qwen2.5:7b
+# 3. Install dependencies
+pip install -r requirements.txt
 
-# 3. Run your first crawl
+# 4. Install Playwright browser (needed for JS-heavy sites)
+playwright install chromium
+
+# 5. Start Ollama and pull the required models
+ollama serve &
+ollama pull qwen2.5:7b    # extractor model (~4GB)
+ollama pull qwen2.5:1.5b  # navigator model (~1GB)
+```
+
+### Run your first crawl
+
+```bash
 python main.py crawl \
-  --goal "Extract the product name, price, and description" \
-  --start-url "https://example.com/product" \
+  --goal "Get the top 5 stories from Hacker News with titles and scores" \
+  --start-url "https://news.ycombinator.com" \
   --workflow simple \
-  --max-pages 1
+  --max-pages 3
 ```
 
 Results are printed to the terminal and stored in `crawl_data.db`.
+
+### Launch the web dashboard
+
+```bash
+python main.py web
+# Open http://localhost:8420 in your browser
+```
 
 ---
 
