@@ -22,7 +22,7 @@
 
 ## 1. Quick Start
 
-### After cloning (fresh setup)
+### Setup (post-clone)
 
 ```bash
 # 1. Clone the repo
@@ -30,16 +30,23 @@ git clone https://github.com/hectorsvill/ai-crawler.git
 cd ai-crawler
 
 # 2. Create and activate a virtual environment
-python3.12 -m venv .venv
+# Use python3.12 if available; python3 works on 3.13/3.14 (crewai will be skipped)
+python3.12 -m venv .venv   # preferred
+# python3 -m venv .venv    # fallback
 source .venv/bin/activate
 
 # 3. Install dependencies
 pip install -r requirements.txt
+# Note: crewai requires Python ≤3.13 and is skipped on 3.14+; degrades to simple mode.
 
 # 4. Install Playwright browser (needed for JS-heavy sites)
 playwright install chromium
 
-# 5. Start Ollama and pull the required models
+# 5. Verify install — run tests (no Ollama or network needed)
+pip install pytest pytest-asyncio
+pytest tests/ -v   # expect 143 passed
+
+# 6. Start Ollama and pull the required models
 ollama serve &
 ollama pull qwen2.5:7b    # extractor model (~4GB)
 ollama pull qwen2.5:1.5b  # navigator model (~1GB)

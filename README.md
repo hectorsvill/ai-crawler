@@ -9,7 +9,7 @@ Supports three workflow modes: **simple**, **LangGraph** (stateful), and **CrewA
 
 ## Prerequisites
 
-- **Python 3.12+**
+- **Python 3.10+** (3.12 recommended; `crewai` requires Python ≤3.13)
 - **Ollama** installed and running: [https://ollama.ai/download](https://ollama.ai/download)
 - **ROCm** (for AMD GPU acceleration) — Ollama handles this automatically on Linux
 
@@ -21,15 +21,35 @@ Supports three workflow modes: **simple**, **LangGraph** (stateful), and **CrewA
 git clone https://github.com/hectorsvill/ai-crawler.git
 cd ai-crawler
 
-# Create virtual environment
-python3.12 -m venv .venv
+# Create a virtual environment
+# Use python3.12 if available; python3 works on 3.13/3.14 (crewai will be skipped)
+python3.12 -m venv .venv   # preferred
+# python3 -m venv .venv    # fallback if python3.12 is not in PATH
+
 source .venv/bin/activate
 
 # Install Python dependencies
 pip install -r requirements.txt
 
-# Install Playwright browser (required for JS-heavy sites)
+# Note: on Python 3.14, crewai will fail to install (it requires ≤3.13).
+# All other features work. crewai mode degrades silently to simple mode.
+
+# Install Playwright browser (for JS-heavy sites)
 playwright install chromium
+```
+
+### Post-clone verification
+
+After installing, confirm everything is wired up correctly:
+
+```bash
+# Syntax-check all source files (no Ollama needed)
+python -c "import ast, pathlib; [ast.parse(f.read_text()) for f in pathlib.Path('.').rglob('*.py') if '.venv' not in str(f)]"
+
+# Run the full test suite (no Ollama or network needed)
+pip install pytest pytest-asyncio   # one-time
+pytest tests/ -v
+# Expected: 143 passed
 ```
 
 ---
@@ -76,6 +96,30 @@ Expected output: a summary table with extracted HN stories and token usage stats
 ---
 
 ## 4. Usage Examples
+
+### Crypto — Latest Binance Coin Listings
+
+Binance is a JS-heavy site, so Playwright is required. Use a capable model (gemma3 or better)
+and set the navigator model via env var since the default small models struggle with structured output.
+
+```bash
+CRAWLER_OLLAMA__NAVIGATOR_MODEL=gemma3:latest \
+python main.py crawl \
+  --goal "Find the latest Binance coin listings and new token launches — extract coin name, symbol, listing date, and description" \
+  --start-url "https://www.coingecko.com/en/exchanges/binance" \
+  --start-url "https://cryptorank.io/exchanges/binance/new-listings" \
+  --workflow simple \
+  --max-pages 8 \
+  --max-depth 2 \
+  --model gemma3:latest
+```
+
+> **Tip:** For JS-heavy sites (Binance, CoinGecko), Playwright must be installed:
+> ```bash
+> playwright install chromium
+> ```
+
+---
 
 ### Research / Knowledge Base Building
 
@@ -165,11 +209,32 @@ python main.py crawl --goal "..." --start-url "..." --resume
 ## 6. Exporting Results
 
 ```bash
-# Export all extracted data to JSON
+# Export structured JSON extractions (default)
 python main.py export <session-id> --output results.json
 
-# The JSON file contains an array of extraction records:
-# [{"data": {...}, "confidence": 0.85, "schema": "product_listing"}, ...]
+# Export every crawled page as clean Markdown — ready for RAG, vector DBs, and LLM pipelines
+python main.py export <session-id> --format markdown --output pages.md
+```
+
+**JSON output** — one record per page, LLM-extracted structured data:
+```json
+[{"data": {...}, "confidence": 0.85, "schema": "product_listing"}, ...]
+```
+
+**Markdown output** — one section per crawled page, clean and LLM-ready:
+```markdown
+# Crawled Pages — Session f5dbfea0
+*8 pages · exported by ai-crawler*
+
+## pokemon · GitHub Topics · GitHub
+**URL:** https://github.com/topics/pokemon
+**Fetched:** 2026-03-31T04:41:36
+
+# Search code, repositories, users, issues, pull requests...
+Here are 5,866 public repositories matching this topic...
+...
+
+---
 ```
 
 ---
@@ -319,6 +384,17 @@ playwright install-deps  # install system dependencies
 The crawler degrades gracefully to `simple` mode. Install with:
 ```bash
 pip install langgraph crewai[tools]
+```
+
+**`crewai` fails to install (Python 3.14+):**
+`crewai>=0.80` requires Python ≤3.13. Either install Python 3.12 (`brew install python@3.12`)
+and recreate the venv, or use the crawler without crewai — it falls back to `simple` mode automatically.
+```bash
+# Recreate venv with Python 3.12
+brew install python@3.12
+python3.12 -m venv .venv
+source .venv/bin/activate
+pip install -r requirements.txt
 ```
 
 **AMD GPU not utilized:**

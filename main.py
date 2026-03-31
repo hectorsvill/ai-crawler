@@ -279,24 +279,61 @@ async def _list_sessions(config_path: Path | None, limit: int) -> None:
 def export(
     session_id: str = typer.Argument(..., help="Session ID to export."),
     output: Path = typer.Option(Path("extracted_data.json"), "--output", "-o"),
+    fmt: str = typer.Option("json", "--format", "-f", help="Output format: json | markdown"),
     config_path: Optional[Path] = typer.Option(None, "--config", "-c"),
 ) -> None:
-    """Export extracted data from a session to a JSON file."""
-    asyncio.run(_export(session_id, output, config_path))
+    """Export crawl data from a session.
+
+    --format json      (default) Structured JSON extractions from the LLM agent.
+    --format markdown  Clean Markdown of every crawled page — ready for RAG,
+                       vector DBs, and LLM pipelines.
+    """
+    if fmt not in ("json", "markdown"):
+        console.print(f"[red]Unknown format '{fmt}'. Use 'json' or 'markdown'.[/red]")
+        raise typer.Exit(1)
+    asyncio.run(_export(session_id, output, fmt, config_path))
 
 
-async def _export(session_id: str, output: Path, config_path: Path | None) -> None:
+async def _export(session_id: str, output: Path, fmt: str, config_path: Path | None) -> None:
     from config import load_config
-    from storage.db import get_all_extractions, init_db
+    from storage.db import get_all_extractions, get_all_pages_markdown, init_db
 
     config = load_config(config_path)
     await init_db(config.storage.db_path)
 
-    extractions = await get_all_extractions(session_id)
-    with open(output, "w") as f:
-        json.dump(extractions, f, indent=2, default=str)
+    if fmt == "markdown":
+        pages = await get_all_pages_markdown(session_id)
+        if not pages:
+            console.print("[yellow]No crawled pages with markdown content found for this session.[/yellow]")
+            raise typer.Exit(0)
 
-    console.print(f"[green]Exported {len(extractions)} records to {output}[/green]")
+        # Default output name when user didn't override
+        if output == Path("extracted_data.json"):
+            output = Path("crawled_pages.md")
+
+        lines: list[str] = [
+            f"# Crawled Pages — Session {session_id[:8]}\n",
+            f"*{len(pages)} pages · exported by ai-crawler*\n",
+            "\n---\n",
+        ]
+        for page in pages:
+            title = page["title"] or page["url"]
+            lines.append(f"\n## {title}\n")
+            lines.append(f"**URL:** {page['url']}  \n")
+            if page["fetched_at"]:
+                lines.append(f"**Fetched:** {page['fetched_at']}  \n")
+            lines.append("\n")
+            lines.append(page["markdown"])
+            lines.append("\n\n---\n")
+
+        output.write_text("\n".join(lines), encoding="utf-8")
+        console.print(f"[green]Exported {len(pages)} pages as Markdown → {output}[/green]")
+
+    else:
+        extractions = await get_all_extractions(session_id)
+        with open(output, "w") as f:
+            json.dump(extractions, f, indent=2, default=str)
+        console.print(f"[green]Exported {len(extractions)} records to {output}[/green]")
 
 
 # ── Resume command ─────────────────────────────────────────────────────────────

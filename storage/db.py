@@ -499,6 +499,35 @@ async def get_all_extractions(session_id: str) -> list[dict]:
     return [{"data": r.data, "confidence": r.confidence, "schema": r.schema_used} for r in records]
 
 
+async def get_all_pages_markdown(session_id: str) -> list[dict]:
+    """Return all crawled pages for a session as {url, title, markdown} dicts.
+
+    Pages are joined via URLRecord so only pages belonging to this session
+    are returned.  Pages with no markdown content are skipped.
+    """
+    from storage.models import URLRecord
+
+    async with get_session() as db:
+        result = await db.execute(
+            select(VisitedPage)
+            .join(URLRecord, URLRecord.url == VisitedPage.url)
+            .where(URLRecord.session_id == session_id)
+            .order_by(VisitedPage.extracted_at.asc())
+        )
+        pages = result.scalars().all()
+
+    return [
+        {
+            "url": p.url,
+            "title": p.title or "",
+            "markdown": p.markdown or "",
+            "fetched_at": p.extracted_at.isoformat() if p.extracted_at else None,
+        }
+        for p in pages
+        if p.markdown and p.markdown.strip()
+    ]
+
+
 # ── Web dashboard helpers ─────────────────────────────────────────────────────
 
 async def ensure_fts_and_logs(engine: "AsyncEngine") -> None:
