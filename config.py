@@ -39,6 +39,26 @@ class CrawlConfig(BaseModel):
     domain_denylist: list[str] = Field(default=[])
     use_playwright_for: list[str] = Field(default=[])
 
+    # ── Phase 1: Sitemap + intelligent queuing ────────────────────────────────
+    sitemap_enabled: bool = True
+    sitemap_max_urls: int = 10_000
+    sitemap_priority_boost: float = 0.1
+    # Depth-decay multiplier: effective_priority *= (1 - decay)^depth
+    priority_depth_decay: float = 0.15
+    priority_url_heuristics: bool = True
+
+    # ── Phase 2: Adaptive rate limiting ──────────────────────────────────────
+    backoff_base: float = 2.0        # seconds; doubles per retry
+    backoff_max: float = 120.0       # cap on backoff wait
+    rate_recovery_factor: float = 1.2  # rate multiplier on sustained success
+    rate_success_window: int = 5       # successes before rate recovery
+    max_retries_per_url: int = 3
+
+    # ── Phase 4: Incremental crawling ─────────────────────────────────────────
+    incremental_crawl: bool = False
+    incremental_older_than_days: int = 7
+    conditional_requests: bool = True  # send ETag/If-Modified-Since
+
 
 class StorageConfig(BaseModel):
     db_path: str = "crawl_data.db"

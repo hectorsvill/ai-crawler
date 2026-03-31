@@ -49,7 +49,7 @@
     </div>
 
     <!-- Workflow + limits row -->
-    <div class="grid grid-cols-3 gap-4">
+    <div class="grid grid-cols-1 sm:grid-cols-3 gap-4">
       <div>
         <label class="block text-sm text-gray-400 mb-1.5">Workflow</label>
         <select name="workflow"
@@ -78,7 +78,7 @@
     </div>
 
     <!-- Model overrides -->
-    <div class="grid grid-cols-2 gap-4">
+    <div class="grid grid-cols-1 sm:grid-cols-2 gap-4">
       <div>
         <label class="block text-sm text-gray-400 mb-1.5">Navigator Model</label>
         <select name="navigator_model"
@@ -102,10 +102,11 @@
     </div>
 
     <!-- Submit -->
-    <div class="flex items-center gap-3 pt-2">
+    <div class="flex flex-wrap items-center gap-3 pt-2">
       <button type="submit"
-              class="px-6 py-2.5 bg-cyan-electric/10 hover:bg-cyan-electric/20 border border-cyan-electric/50
-                     text-cyan-electric text-sm font-medium rounded transition-colors flex items-center gap-2">
+              class="flex-1 sm:flex-none px-6 py-3 sm:py-2.5 bg-cyan-electric/10 hover:bg-cyan-electric/20
+                     border border-cyan-electric/50 text-cyan-electric text-sm font-medium rounded
+                     transition-colors flex items-center justify-center gap-2">
         <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
           <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13 10V3L4 14h7v7l9-11h-7z"/>
         </svg>

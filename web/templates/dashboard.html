@@ -12,7 +12,7 @@
 </div>
 
 <!-- Header row -->
-<div class="flex items-center justify-between mt-6 mb-4">
+<div class="flex flex-wrap items-center justify-between gap-3 mt-6 mb-4">
   <h1 class="text-lg font-semibold text-gray-100">Recent Sessions</h1>
   <a href="/crawl/new"
      class="flex items-center gap-2 px-4 py-2 bg-cyan-electric/10 hover:bg-cyan-electric/20
@@ -24,78 +24,80 @@
   </a>
 </div>
 
-<!-- Sessions table -->
+<!-- Sessions table — horizontally scrollable on mobile -->
 <div class="bg-surface rounded-lg border border-gray-800 overflow-hidden">
   {% if sessions %}
-  <table class="w-full text-sm">
-    <thead>
-      <tr class="border-b border-gray-800 text-xs text-gray-500 uppercase tracking-wider">
-        <th class="px-4 py-3 text-left">Status</th>
-        <th class="px-4 py-3 text-left">Goal</th>
-        <th class="px-4 py-3 text-left">Workflow</th>
-        <th class="px-4 py-3 text-right font-mono">Pages</th>
-        <th class="px-4 py-3 text-right font-mono">Extrs.</th>
-        <th class="px-4 py-3 text-left">Started</th>
-        <th class="px-4 py-3 text-left">Actions</th>
-      </tr>
-    </thead>
-    <tbody class="divide-y divide-gray-800/60">
-      {% for s in sessions %}
-      {% set status = s.status %}
-      <tr class="session-row hover:bg-surface-hover/50 transition-colors"
-          onclick="window.location='/session/{{ s.id }}'">
-        <td class="px-4 py-3">
-          {% if status == 'running' %}
-            <span class="status-running text-green-ok text-xs font-mono">running</span>
-          {% elif status == 'completed' %}
-            <span class="inline-flex items-center gap-1.5 text-cyan-electric text-xs font-mono">
-              <span class="w-2 h-2 rounded-full bg-cyan-electric"></span>done
+  <div class="overflow-x-auto">
+    <table class="w-full text-sm min-w-[640px]">
+      <thead>
+        <tr class="border-b border-gray-800 text-xs text-gray-500 uppercase tracking-wider">
+          <th class="px-4 py-3 text-left">Status</th>
+          <th class="px-4 py-3 text-left">Goal</th>
+          <th class="px-4 py-3 text-left hidden sm:table-cell">Workflow</th>
+          <th class="px-4 py-3 text-right font-mono">Pages</th>
+          <th class="px-4 py-3 text-right font-mono hidden sm:table-cell">Extrs.</th>
+          <th class="px-4 py-3 text-left hidden md:table-cell">Started</th>
+          <th class="px-4 py-3 text-left">Actions</th>
+        </tr>
+      </thead>
+      <tbody class="divide-y divide-gray-800/60">
+        {% for s in sessions %}
+        {% set status = s.status %}
+        <tr class="session-row hover:bg-surface-hover/50 transition-colors"
+            onclick="window.location='/session/{{ s.id }}'">
+          <td class="px-4 py-3 whitespace-nowrap">
+            {% if status == 'running' %}
+              <span class="status-running text-green-ok text-xs font-mono">running</span>
+            {% elif status == 'completed' %}
+              <span class="inline-flex items-center gap-1.5 text-cyan-electric text-xs font-mono">
+                <span class="w-2 h-2 rounded-full bg-cyan-electric flex-shrink-0"></span>done
+              </span>
+            {% elif status == 'failed' %}
+              <span class="inline-flex items-center gap-1.5 text-red-err text-xs font-mono">
+                <span class="w-2 h-2 rounded-full bg-red-err flex-shrink-0"></span>failed
+              </span>
+            {% else %}
+              <span class="inline-flex items-center gap-1.5 text-amber-warn text-xs font-mono">
+                <span class="w-2 h-2 rounded-full bg-amber-warn flex-shrink-0"></span>{{ status }}
+              </span>
+            {% endif %}
+          </td>
+          <td class="px-4 py-3 max-w-[200px] sm:max-w-xs">
+            <span class="block truncate text-gray-200" title="{{ s.goal }}">{{ s.goal }}</span>
+            <span class="text-xs font-mono text-gray-600">{{ s.id[:12] }}…</span>
+          </td>
+          <td class="px-4 py-3 hidden sm:table-cell whitespace-nowrap">
+            <span class="px-2 py-0.5 text-xs font-mono rounded border
+              {% if s.workflow_used == 'simple' %}text-cyan-400 border-cyan-800 bg-cyan-900/20
+              {% elif s.workflow_used == 'langgraph' %}text-purple-400 border-purple-800 bg-purple-900/20
+              {% else %}text-amber-400 border-amber-800 bg-amber-900/20{% endif %}">
+              {{ s.workflow_used }}
             </span>
-          {% elif status == 'failed' %}
-            <span class="inline-flex items-center gap-1.5 text-red-err text-xs font-mono">
-              <span class="w-2 h-2 rounded-full bg-red-err"></span>failed
-            </span>
-          {% else %}
-            <span class="inline-flex items-center gap-1.5 text-amber-warn text-xs font-mono">
-              <span class="w-2 h-2 rounded-full bg-amber-warn"></span>{{ status }}
-            </span>
-          {% endif %}
-        </td>
-        <td class="px-4 py-3 max-w-xs">
-          <span class="block truncate text-gray-200" title="{{ s.goal }}">{{ s.goal }}</span>
-          <span class="text-xs font-mono text-gray-600">{{ s.id[:12] }}…</span>
-        </td>
-        <td class="px-4 py-3">
-          <span class="px-2 py-0.5 text-xs font-mono rounded border
-            {% if s.workflow_used == 'simple' %}text-cyan-400 border-cyan-800 bg-cyan-900/20
-            {% elif s.workflow_used == 'langgraph' %}text-purple-400 border-purple-800 bg-purple-900/20
-            {% else %}text-amber-400 border-amber-800 bg-amber-900/20{% endif %}">
-            {{ s.workflow_used }}
-          </span>
-        </td>
-        <td class="px-4 py-3 text-right font-mono text-gray-300">{{ s.pages_crawled }}</td>
-        <td class="px-4 py-3 text-right font-mono text-gray-300">{{ s.extractions }}</td>
-        <td class="px-4 py-3 text-xs text-gray-500 font-mono whitespace-nowrap">
-          {% if s.started_at %}{{ s.started_at.strftime('%m-%d %H:%M') }}{% else %}—{% endif %}
-        </td>
-        <td class="px-4 py-3" onclick="event.stopPropagation()">
-          <div class="flex items-center gap-2">
-            <a href="/session/{{ s.id }}"
-               class="text-xs text-gray-400 hover:text-cyan-electric transition-colors">View</a>
-            <a href="/api/sessions/{{ s.id }}/export"
-               class="text-xs text-gray-400 hover:text-amber-warn transition-colors">Export</a>
-            <button
-              hx-delete="/api/sessions/{{ s.id }}"
-              hx-confirm="Delete session {{ s.id[:8] }}? This cannot be undone."
-              hx-target="closest tr"
-              hx-swap="outerHTML"
-              class="text-xs text-gray-600 hover:text-red-err transition-colors">Del</button>
-          </div>
-        </td>
-      </tr>
-      {% endfor %}
-    </tbody>
-  </table>
+          </td>
+          <td class="px-4 py-3 text-right font-mono text-gray-300 whitespace-nowrap">{{ s.pages_crawled }}</td>
+          <td class="px-4 py-3 text-right font-mono text-gray-300 hidden sm:table-cell">{{ s.extractions }}</td>
+          <td class="px-4 py-3 text-xs text-gray-500 font-mono whitespace-nowrap hidden md:table-cell">
+            {% if s.started_at %}{{ s.started_at.strftime('%m-%d %H:%M') }}{% else %}—{% endif %}
+          </td>
+          <td class="px-4 py-3" onclick="event.stopPropagation()">
+            <div class="flex items-center gap-2 whitespace-nowrap">
+              <a href="/session/{{ s.id }}"
+                 class="text-xs text-gray-400 hover:text-cyan-electric transition-colors">View</a>
+              <a href="/api/sessions/{{ s.id }}/export"
+                 class="text-xs text-gray-400 hover:text-amber-warn transition-colors hidden sm:inline">Export</a>
+              <button
+                hx-delete="/api/sessions/{{ s.id }}"
+                hx-confirm="Delete session {{ s.id[:8] }}? This cannot be undone."
+                hx-target="closest tr"
+                hx-swap="outerHTML"
+                class="text-xs text-gray-600 hover:text-red-err transition-colors">Del</button>
+            </div>
+          </td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
   {% else %}
   <div class="py-16 text-center">
     <svg class="w-12 h-12 text-gray-700 mx-auto mb-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">

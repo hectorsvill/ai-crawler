@@ -9,7 +9,7 @@ Supports three workflow modes: **simple**, **LangGraph** (stateful), and **CrewA
 
 ## Prerequisites
 
-- **Python 3.11+**
+- **Python 3.12+**
 - **Ollama** installed and running: [https://ollama.ai/download](https://ollama.ai/download)
 - **ROCm** (for AMD GPU acceleration) — Ollama handles this automatically on Linux
 
@@ -45,7 +45,7 @@ ollama list
 cd ai-crawler
 
 # Create a virtual environment (recommended)
-python3.11 -m venv .venv
+python3.12 -m venv .venv
 source .venv/bin/activate
 
 # Install Python packages

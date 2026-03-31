@@ -197,15 +197,40 @@ async def fetch_with_playwright(
 
 # ── crawl4ai integration ───────────────────────────────────────────────────────
 
-async def fetch_with_crawl4ai(url: str) -> str | None:
-    """Use crawl4ai for enhanced markdown extraction. Returns None on failure."""
+async def fetch_with_crawl4ai(url: str) -> tuple[str, list[str]] | None:
+    """Use crawl4ai for enhanced markdown extraction.
+
+    Returns (markdown, links) tuple on success, None on failure.
+    Links are extracted from the crawl4ai result's link set when available,
+    with a fallback to parsing the raw HTML if provided.
+    """
     if not HAS_CRAWL4AI:
         return None
     try:
         async with AsyncWebCrawler() as crawler:
             result = await crawler.arun(url=url)
             if result and result.markdown:
-                return result.markdown
+                # crawl4ai provides links as a dict {internal: [...], external: [...]}
+                links: list[str] = []
+                raw_for_links: str | None = None
+
+                if hasattr(result, "links") and isinstance(result.links, dict):
+                    for group in result.links.values():
+                        for item in group:
+                            href = item.get("href") if isinstance(item, dict) else str(item)
+                            if href and href.startswith("http"):
+                                links.append(href)
+
+                # Fallback: parse cleaned_html or html if links dict was empty
+                if not links:
+                    raw_for_links = (
+                        getattr(result, "cleaned_html", None)
+                        or getattr(result, "html", None)
+                    )
+                    if raw_for_links:
+                        links = extract_links(raw_for_links, url)
+
+                return result.markdown, links
     except Exception as exc:
         logger.debug("crawl4ai failed for %s: %s", url, exc)
     return None
@@ -235,17 +260,19 @@ async def fetch_page(
     # crawl4ai path (fast markdown extraction)
     if not force_playwright and HAS_CRAWL4AI:
         try:
-            crawl4ai_md = await fetch_with_crawl4ai(url)
-            if crawl4ai_md and len(crawl4ai_md) >= STATIC_CONTENT_THRESHOLD:
-                return PageContent(
-                    url=url,
-                    markdown=crawl4ai_md,
-                    raw_html=None,
-                    title=None,
-                    content_hash=compute_content_hash(crawl4ai_md),
-                    fetch_method="crawl4ai",
-                    links=[],
-                )
+            c4ai = await fetch_with_crawl4ai(url)
+            if c4ai is not None:
+                crawl4ai_md, crawl4ai_links = c4ai
+                if crawl4ai_md and len(crawl4ai_md) >= STATIC_CONTENT_THRESHOLD:
+                    return PageContent(
+                        url=url,
+                        markdown=crawl4ai_md,
+                        raw_html=None,
+                        title=None,
+                        content_hash=compute_content_hash(crawl4ai_md),
+                        fetch_method="crawl4ai",
+                        links=crawl4ai_links,
+                    )
         except Exception as exc:
             logger.debug("crawl4ai path failed, falling back: %s", exc)
 

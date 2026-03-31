@@ -53,3 +53,20 @@ Thumbs.db
 # Results / exports
 results*.json
 exports/
+
+# Crawl output / research JSON files
+hn_digest.json
+*_digest.json
+*_research.json
+*_trending.json
+github_trending.json
+
+# SQL files
+*.sql
+*.sql.gz
+
+# Pip install artifacts (e.g., accidentally created by `pip install pkg=version`)
+=*
+
+# Test result markdown
+test_results.md

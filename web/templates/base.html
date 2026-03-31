@@ -33,31 +33,79 @@
   <link rel="stylesheet" href="/static/crawler.css">
   {% block extra_head %}{% endblock %}
 </head>
-<body class="bg-[#0a0a0f] text-gray-200 font-sans antialiased">
+<body class="bg-[#0a0a0f] text-gray-200 font-sans antialiased"
+      x-data="{ sidebarOpen: false }">
 
-<div class="flex h-screen overflow-hidden">
+<!-- ── Mobile top bar ─────────────────────────────────────────────────────── -->
+<header class="lg:hidden fixed top-0 inset-x-0 z-40 flex items-center gap-3
+               px-4 h-12 bg-sidebar border-b border-gray-800">
+  <button @click="sidebarOpen = true"
+          class="p-1.5 rounded text-gray-400 hover:text-gray-100 hover:bg-surface-hover transition-colors"
+          aria-label="Open menu">
+    <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+      <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 6h16M4 12h16M4 18h16"/>
+    </svg>
+  </button>
+  <div class="flex items-center gap-2">
+    <div class="w-5 h-5 rounded bg-cyan-electric/20 flex items-center justify-center">
+      <svg class="w-3 h-3 text-cyan-electric" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13 10V3L4 14h7v7l9-11h-7z"/>
+      </svg>
+    </div>
+    <span class="text-sm font-semibold text-gray-100">AI Crawler</span>
+  </div>
+  <span id="topbar-running" class="ml-auto text-xs font-mono text-green-ok hidden"></span>
+</header>
+
+<!-- ── Sidebar backdrop (mobile only) ────────────────────────────────────── -->
+<div x-show="sidebarOpen"
+     x-transition:enter="transition-opacity duration-200"
+     x-transition:enter-start="opacity-0"
+     x-transition:enter-end="opacity-100"
+     x-transition:leave="transition-opacity duration-150"
+     x-transition:leave-start="opacity-100"
+     x-transition:leave-end="opacity-0"
+     @click="sidebarOpen = false"
+     class="lg:hidden fixed inset-0 z-40 bg-black/60"
+     style="display:none"></div>
+
+<!-- ── App shell ─────────────────────────────────────────────────────────── -->
+<div class="flex h-screen overflow-hidden pt-12 lg:pt-0">
 
   <!-- Sidebar -->
-  <nav class="w-52 bg-sidebar border-r border-gray-800 flex flex-col flex-shrink-0">
-    <!-- Logo -->
-    <div class="px-4 py-4 border-b border-gray-800">
+  <nav class="fixed lg:relative inset-y-0 left-0 z-50
+              w-64 lg:w-52 bg-sidebar border-r border-gray-800
+              flex flex-col flex-shrink-0
+              transform transition-transform duration-200 ease-in-out
+              lg:translate-x-0"
+       :class="sidebarOpen ? 'translate-x-0' : '-translate-x-full lg:translate-x-0'">
+
+    <!-- Logo + close button -->
+    <div class="px-4 py-4 border-b border-gray-800 flex items-center justify-between">
       <div class="flex items-center gap-2">
         <div class="w-6 h-6 rounded bg-cyan-electric/20 flex items-center justify-center">
           <svg class="w-4 h-4 text-cyan-electric" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
-              d="M13 10V3L4 14h7v7l9-11h-7z"/>
+            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13 10V3L4 14h7v7l9-11h-7z"/>
           </svg>
         </div>
         <span class="text-sm font-semibold text-gray-100">AI Crawler</span>
       </div>
+      <!-- Close button — mobile only -->
+      <button @click="sidebarOpen = false"
+              class="lg:hidden p-1 text-gray-500 hover:text-gray-200 transition-colors"
+              aria-label="Close menu">
+        <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+          <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12"/>
+        </svg>
+      </button>
     </div>
 
     <!-- Nav items -->
-    <div class="flex-1 py-3 space-y-0.5 px-2">
+    <div class="flex-1 py-3 space-y-0.5 px-2 overflow-y-auto">
       {% set current = request.url.path %}
 
-      <a href="/"
-         class="flex items-center gap-3 px-3 py-2 rounded text-sm transition-colors
+      <a href="/" @click="sidebarOpen = false"
+         class="flex items-center gap-3 px-3 py-2.5 rounded text-sm transition-colors
                 {% if current == '/' %}nav-item-active{% else %}text-gray-400 hover:text-gray-100 hover:bg-surface-hover{% endif %}">
         <svg class="w-4 h-4 flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
           <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
@@ -66,8 +114,8 @@
         Dashboard
       </a>
 
-      <a href="/search"
-         class="flex items-center gap-3 px-3 py-2 rounded text-sm transition-colors
+      <a href="/search" @click="sidebarOpen = false"
+         class="flex items-center gap-3 px-3 py-2.5 rounded text-sm transition-colors
                 {% if current.startswith('/search') %}nav-item-active{% else %}text-gray-400 hover:text-gray-100 hover:bg-surface-hover{% endif %}">
         <svg class="w-4 h-4 flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
           <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
@@ -76,12 +124,11 @@
         Search
       </a>
 
-      <a href="/crawl/new"
-         class="flex items-center gap-3 px-3 py-2 rounded text-sm transition-colors
+      <a href="/crawl/new" @click="sidebarOpen = false"
+         class="flex items-center gap-3 px-3 py-2.5 rounded text-sm transition-colors
                 {% if current == '/crawl/new' %}nav-item-active{% else %}text-gray-400 hover:text-gray-100 hover:bg-surface-hover{% endif %}">
         <svg class="w-4 h-4 flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-          <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
-            d="M12 4v16m8-8H4"/>
+          <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 4v16m8-8H4"/>
         </svg>
         New Crawl
       </a>
@@ -91,9 +138,10 @@
     <div class="px-4 py-3 border-t border-gray-800">
       <div id="sidebar-status"
            hx-get="/partials/stats"
-           hx-trigger="every 15s"
+           hx-trigger="load, every 15s"
            hx-swap="none"
-           hx-on="htmx:afterRequest: updateSidebarStatus(event)">
+           hx-on::after-request="updateSidebarStatus(event)">
+        <p class="text-xs text-gray-700 font-mono" id="sidebar-running"></p>
       </div>
       <p class="text-xs text-gray-600 font-mono">
         <a href="http://localhost:11434" target="_blank" class="hover:text-gray-400">Ollama ↗</a>
@@ -102,8 +150,8 @@
   </nav>
 
   <!-- Main content -->
-  <main class="flex-1 overflow-y-auto">
-    <div class="max-w-screen-2xl mx-auto px-6 py-5">
+  <main class="flex-1 overflow-y-auto min-w-0">
+    <div class="max-w-screen-2xl mx-auto px-4 sm:px-6 py-4 sm:py-5">
       {% block content %}{% endblock %}
     </div>
   </main>
@@ -151,6 +199,39 @@
     });
   }
 
+  // Sidebar + topbar status updater — called after /partials/stats refreshes
+  function updateSidebarStatus(event) {
+    try {
+      const parser = new DOMParser();
+      const doc = parser.parseFromString(event.detail.xhr.responseText, 'text/html');
+      const statsBar = doc.getElementById('stats-bar');
+      if (!statsBar) return;
+      // Find the "Running" card value
+      const cards = statsBar.querySelectorAll('p.font-mono');
+      let running = 0;
+      cards.forEach(c => {
+        const n = parseInt(c.textContent.trim());
+        if (!isNaN(n) && n > 0 && c.classList.contains('text-green-ok')) running = n;
+      });
+      // Sidebar indicator
+      const sidebarEl = document.getElementById('sidebar-running');
+      if (sidebarEl) {
+        sidebarEl.textContent = running > 0 ? `● ${running} running` : '';
+        sidebarEl.className = running > 0 ? 'text-xs font-mono text-green-ok' : 'text-xs font-mono text-gray-700';
+      }
+      // Mobile top bar indicator
+      const topbarEl = document.getElementById('topbar-running');
+      if (topbarEl) {
+        if (running > 0) {
+          topbarEl.textContent = `● ${running}`;
+          topbarEl.classList.remove('hidden');
+        } else {
+          topbarEl.classList.add('hidden');
+        }
+      }
+    } catch(e) {}
+  }
+
   // htmx config
   htmx.config.defaultSwapStyle = 'innerHTML';
 </script>
@@ -158,7 +239,7 @@
 <!-- Copy toast -->
 <div id="copy-toast"
      class="fixed bottom-6 right-6 bg-green-ok/20 border border-green-ok/40 text-green-ok
-            text-sm font-mono px-4 py-2 rounded transition-opacity duration-300 opacity-0 pointer-events-none">
+            text-sm font-mono px-4 py-2 rounded transition-opacity duration-300 opacity-0 pointer-events-none z-50">
   Copied!
 </div>
 

@@ -11,6 +11,8 @@ from __future__ import annotations
 from urllib.parse import (
     ParseResult,
     parse_qsl,
+    quote,
+    unquote,
     urlencode,
     urldefrag,
     urlparse,
@@ -54,8 +56,14 @@ def normalize_url(url: str) -> str:
         # 4 & 5. Sort query params (also normalises percent-encoding via parse_qsl)
         query = urlencode(sorted(parse_qsl(parsed.query, keep_blank_values=True)))
 
+        # 4b. Normalize path percent-encoding: decode then re-encode with a
+        # consistent safe set so that %28foo%29 and (foo) map to the same URL.
+        # RFC 3986 unreserved + sub-delimiters that are safe unencoded in paths:
+        _PATH_SAFE = "/:@!$&'()*+,;=-._~"
+        path = quote(unquote(parsed.path), safe=_PATH_SAFE)
+
         # 6. Normalize trailing slashes — strip from all paths for consistency
-        path = parsed.path.rstrip("/") or ""
+        path = path.rstrip("/") or ""
 
         normalized = urlunparse((scheme, netloc, path, parsed.params, query, ""))
         return normalized

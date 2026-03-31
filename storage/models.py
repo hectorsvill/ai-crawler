@@ -18,6 +18,7 @@ from typing import Any
 from pydantic import BaseModel, Field, field_validator
 from sqlalchemy import (
     JSON,
+    Boolean,
     DateTime,
     Enum,
     Float,
@@ -85,6 +86,15 @@ class URLRecord(Base):
         DateTime, server_default=func.now(), onupdate=func.now(), nullable=False
     )
     error_message: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # Phase 1 additions
+    source: Mapped[str] = mapped_column(String(32), default="crawl")
+    # "seed" | "sitemap" | "llms_txt" | "crawl"
+    sitemap_priority: Mapped[float | None] = mapped_column(Float, nullable=True)
+    sitemap_changefreq: Mapped[str | None] = mapped_column(String(16), nullable=True)
+    sitemap_lastmod: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    last_crawled_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    recrawl_after_days: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    retry_count: Mapped[int] = mapped_column(Integer, default=0)
 
 
 class VisitedPage(Base):
@@ -106,6 +116,9 @@ class VisitedPage(Base):
         DateTime, server_default=func.now(), nullable=False
     )
     fetch_method: Mapped[str] = mapped_column(String(32), default="aiohttp")
+    # Phase 1 additions — HTTP conditional request headers
+    etag: Mapped[str | None] = mapped_column(String(256), nullable=True)
+    last_modified: Mapped[str | None] = mapped_column(String(64), nullable=True)
 
     extracted_data: Mapped[list[ExtractedData]] = relationship(
         "ExtractedData", back_populates="page", cascade="all, delete-orphan"
@@ -166,6 +179,9 @@ class URLItem(BaseModel):
     status: URLStatus = URLStatus.pending
     session_id: str | None = None
     parent_url: str | None = None
+    source: str = "crawl"
+    sitemap_priority: float | None = None
+    retry_count: int = 0
 
     model_config = {"from_attributes": True}
 
@@ -182,6 +198,10 @@ class PageContent(BaseModel):
     links: list[str] = Field(default_factory=list)
     status_code: int = 200
     error: str | None = None
+    # Phase 1 additions — conditional request support
+    etag: str | None = None
+    last_modified: str | None = None
+    changed: bool = True  # False when 304 or hash unchanged
 
 
 class LinkPriority(BaseModel):

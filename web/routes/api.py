@@ -358,6 +358,13 @@ async def api_delete_session(session_id: str):
         await db.execute(delete(ExtractedData).where(ExtractedData.session_id == session_id))
         await db.execute(delete(URLRecord).where(URLRecord.session_id == session_id))
         await db.execute(delete(CrawlSession).where(CrawlSession.id == session_id))
+        # Clean up VisitedPage rows that are no longer referenced by any ExtractedData
+        await db.execute(
+            sa_text(
+                "DELETE FROM visited_pages WHERE id NOT IN "
+                "(SELECT DISTINCT page_id FROM extracted_data)"
+            )
+        )
     return {"status": "deleted", "session_id": session_id}
 
 

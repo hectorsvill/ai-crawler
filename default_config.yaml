@@ -1,9 +1,9 @@
 ollama:
   base_url: "http://localhost:11434"
-  navigator_model: "qwen2.5:7b"
+  navigator_model: "qwen3:8b"
   extractor_model: "qwen2.5:7b"
-  router_model: "qwen2.5:7b"
-  timeout: 120
+  router_model: "llama3.2:3b"
+  timeout: 180
   max_retries: 3
 
 crawl:
@@ -21,6 +21,25 @@ crawl:
   domain_allowlist: []
   domain_denylist: []
   use_playwright_for: []  # domain patterns requiring JS rendering
+
+  # ── Sitemap + intelligent queuing ─────────────────────────────────────────
+  sitemap_enabled: true
+  sitemap_max_urls: 10000
+  sitemap_priority_boost: 0.1   # bonus added to sitemap <priority> values
+  priority_depth_decay: 0.15    # priority *= (1 - decay)^depth per level
+  priority_url_heuristics: true # boost URLs whose path matches goal keywords
+
+  # ── Adaptive rate limiting ────────────────────────────────────────────────
+  backoff_base: 2.0        # base backoff seconds; doubles per retry
+  backoff_max: 120.0       # maximum backoff cap in seconds
+  rate_recovery_factor: 1.2  # rate multiplier per success window
+  rate_success_window: 5     # consecutive successes before rate recovery
+  max_retries_per_url: 3
+
+  # ── Incremental crawling ──────────────────────────────────────────────────
+  incremental_crawl: false
+  incremental_older_than_days: 7
+  conditional_requests: true   # send ETag/If-Modified-Since headers
 
 storage:
   db_path: "crawl_data.db"

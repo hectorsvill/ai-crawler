@@ -66,8 +66,40 @@ async def init_db(db_path: str = "crawl_data.db") -> AsyncEngine:
     async with _engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
 
+    await migrate_add_columns(_engine)
+
     logger.info("Database initialized at %s", db_path)
     return _engine
+
+
+async def migrate_add_columns(engine: AsyncEngine) -> None:
+    """
+    Idempotent migration: add new columns introduced in Phase 1/2 that may
+    not exist in databases created before this enhancement.
+
+    SQLite ALTER TABLE ADD COLUMN is a no-op if the column already exists
+    (we catch the OperationalError and continue).  All new columns are
+    nullable or have defaults so no data is lost.
+    """
+    migrations = [
+        # URLRecord (urls table)
+        "ALTER TABLE urls ADD COLUMN source TEXT NOT NULL DEFAULT 'crawl'",
+        "ALTER TABLE urls ADD COLUMN sitemap_priority REAL",
+        "ALTER TABLE urls ADD COLUMN sitemap_changefreq TEXT",
+        "ALTER TABLE urls ADD COLUMN sitemap_lastmod TEXT",
+        "ALTER TABLE urls ADD COLUMN last_crawled_at DATETIME",
+        "ALTER TABLE urls ADD COLUMN recrawl_after_days INTEGER",
+        "ALTER TABLE urls ADD COLUMN retry_count INTEGER NOT NULL DEFAULT 0",
+        # VisitedPage (visited_pages table)
+        "ALTER TABLE visited_pages ADD COLUMN etag TEXT",
+        "ALTER TABLE visited_pages ADD COLUMN last_modified TEXT",
+    ]
+    async with engine.begin() as conn:
+        for stmt in migrations:
+            try:
+                await conn.execute(sa_text(stmt))
+            except Exception:
+                pass  # Column already exists — safe to skip
 
 
 async def close_db() -> None:
@@ -242,6 +274,8 @@ async def enqueue_url(item: URLItem) -> bool:
             status=item.status,
             session_id=item.session_id,
             parent_url=item.parent_url,
+            source=item.source,
+            retry_count=item.retry_count,
         )
         db.add(record)
     return True
@@ -334,20 +368,45 @@ def compute_content_hash(content: str) -> str:
 
 async def save_page(page: PageContent) -> int:
     """
-    Persist a fetched page. If the content hash already exists,
-    skip insertion and return the existing page ID.
+    Persist a fetched page.
+
+    Dedup order:
+    1. Same URL — update in-place if content changed, return ID if unchanged.
+    2. Same content hash at a different URL — return the existing page ID.
+    3. Neither — insert a new row.
+
     Returns the page record ID.
     """
     async with get_session() as db:
-        existing = await db.scalar(
-            select(VisitedPage).where(
-                VisitedPage.content_hash == page.content_hash
-            )
+        # 1. Look up by URL first (handles re-crawls of the same page)
+        existing_by_url = await db.scalar(
+            select(VisitedPage).where(VisitedPage.url == page.url)
         )
-        if existing:
-            logger.debug("Skipping duplicate content for %s", page.url)
-            return existing.id
+        if existing_by_url:
+            if existing_by_url.content_hash == page.content_hash:
+                logger.debug("Content unchanged for %s", page.url)
+                return existing_by_url.id
+            # Content changed — update in-place
+            existing_by_url.content_hash = page.content_hash
+            existing_by_url.markdown = page.markdown
+            existing_by_url.raw_html = page.raw_html
+            existing_by_url.title = page.title
+            existing_by_url.fetch_method = page.fetch_method
+            existing_by_url.extracted_at = datetime.now(timezone.utc)
+            existing_by_url.etag = page.etag
+            existing_by_url.last_modified = page.last_modified
+            logger.debug("Updated changed content for %s", page.url)
+            return existing_by_url.id
 
+        # 2. Same content at a different URL (canonical dedup)
+        existing_by_hash = await db.scalar(
+            select(VisitedPage).where(VisitedPage.content_hash == page.content_hash)
+        )
+        if existing_by_hash:
+            logger.debug("Skipping duplicate content for %s", page.url)
+            return existing_by_hash.id
+
+        # 3. New page
         record = VisitedPage(
             url=page.url,
             content_hash=page.content_hash,
@@ -355,10 +414,62 @@ async def save_page(page: PageContent) -> int:
             raw_html=page.raw_html,
             title=page.title,
             fetch_method=page.fetch_method,
+            etag=page.etag,
+            last_modified=page.last_modified,
         )
         db.add(record)
         await db.flush()
         return record.id
+
+
+async def get_page_by_url(url: str) -> "VisitedPage | None":
+    """Return the most recent VisitedPage for a URL across all sessions."""
+    async with get_session() as db:
+        return await db.scalar(
+            select(VisitedPage).where(VisitedPage.url == url)
+        )
+
+
+async def update_page_headers(
+    url: str,
+    etag: "str | None",
+    last_modified: "str | None",
+) -> None:
+    """Persist ETag and Last-Modified headers for future conditional requests."""
+    async with get_session() as db:
+        await db.execute(
+            update(VisitedPage)
+            .where(VisitedPage.url == url)
+            .values(etag=etag, last_modified=last_modified)
+        )
+
+
+async def increment_url_retry(url: str, session_id: str, error: str) -> int:
+    """
+    Increment retry_count for a URL.  If retry_count reaches max_retries,
+    mark the URL as permanently failed and return -1.
+    Otherwise reset status to pending and return the new retry count.
+    """
+    from config import load_config
+    max_retries = load_config().crawl.max_retries_per_url
+
+    async with get_session() as db:
+        record = await db.scalar(
+            select(URLRecord).where(
+                URLRecord.url == url,
+                URLRecord.session_id == session_id,
+            )
+        )
+        if record is None:
+            return -1
+        record.retry_count = (record.retry_count or 0) + 1
+        if record.retry_count >= max_retries:
+            record.status = URLStatus.failed
+            record.error_message = error[:1024]
+            return -1
+        record.status = URLStatus.pending
+        record.error_message = error[:1024]
+        return record.retry_count
 
 
 async def save_extraction(

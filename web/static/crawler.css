@@ -89,3 +89,15 @@ tr.session-row:hover td { background: #1a1a2e; }
 ::-webkit-scrollbar-track { background: #0e0e16; }
 ::-webkit-scrollbar-thumb { background: #2a2a3e; border-radius: 3px; }
 ::-webkit-scrollbar-thumb:hover { background: #3a3a5e; }
+
+/* Mobile sidebar drawer */
+@media (max-width: 1023px) {
+  nav.-translate-x-full { transform: translateX(-100%); }
+  nav.translate-x-0     { transform: translateX(0); }
+}
+
+/* Touch-friendly tap targets on mobile */
+@media (max-width: 640px) {
+  .session-row td { padding-top: 0.75rem; padding-bottom: 0.75rem; }
+  .log-panel { max-height: 60vh; }
+}
