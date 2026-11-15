@@ -201,6 +201,10 @@ async def run_research(
                         goal=goal,
                         content_hash=page.content_hash,
                     )
+                    # Publisher citation_* meta tags are authoritative (markdown often drops
+                    # author lists, e.g. arXiv) — correct/fill the LLM's fields with them.
+                    from utils.citation_meta import merge_into_paper, parse_citation_meta
+                    paper_data = merge_into_paper(paper_data, parse_citation_meta(page.raw_html))
                     if paper_data.confidence >= 0.3:
                         paper_id = await save_research_paper(
                             paper_data=paper_data,
@@ -222,8 +226,12 @@ async def run_research(
             if decision.action == "complete":
                 break
 
+            progress.update(stats)  # refreshes elapsed_seconds before persisting
             await update_session_stats(session_id, stats.model_dump())
-            progress.update(stats)
+
+        # Final stats: the loop can exit via break ("complete"), so persist here too
+        progress.update(stats)
+        await update_session_stats(session_id, stats.model_dump())
 
     await finish_crawl_session(session_id, SessionStatus.completed)
 

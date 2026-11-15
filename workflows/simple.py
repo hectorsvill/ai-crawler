@@ -220,8 +220,12 @@ async def run_simple(
                     logger.error("Extraction failed for %s: %s", item.url, exc)
 
             # Persist stats
+            progress.update(stats)  # refreshes elapsed_seconds before persisting
             await update_session_stats(session_id, stats.model_dump())
-            progress.update(stats)
+
+        # Final stats: the loop can exit via break ("complete"), so persist here too
+        progress.update(stats)
+        await update_session_stats(session_id, stats.model_dump())
 
     # Finalize session
     await finish_crawl_session(session_id, SessionStatus.completed)
