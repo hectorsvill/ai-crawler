@@ -11,6 +11,7 @@ Commands:
   research-list    Browse all stored research papers.
   research-show    Show full details for one paper by ID.
   usage            Token usage / estimated cost per provider, model, run, day.
+  models           Live model list + default per provider (cached ~10 min).
   llm-ping         One tiny LLM call to verify a provider + key; records usage.
   doctor           Check environment readiness (deps, Ollama, models, DB).
   radar ...        Deterministic topic crawler with its own DB (no LLM needed).
@@ -75,6 +76,36 @@ def _fail(msg: str, code: int, as_json: bool = False) -> None:
     raise typer.Exit(code)
 
 
+NO_VALIDATE_HELP = "Skip checking --model against the provider's live model list."
+
+
+def _validate_model(config, model: str | None, no_validate: bool, as_json: bool) -> dict | None:
+    """Check --model against the provider's live list before any live call.
+
+    Unknown model -> exit 2 with suggestions. If the list can't be fetched (no key,
+    provider down) nothing is decided here; the readiness check reports that.
+    """
+    if not model or no_validate:
+        return None
+    from llm.models import check_model, list_models
+    p = config.llm.provider
+    base = config.ollama.base_url if p == "ollama" else config.llm.base_url
+    listing = asyncio.run(list_models(p, base_url=base))
+    chk = check_model(listing, model)
+    if chk["valid"] is False:
+        msg = f"Unknown model '{model}' for provider '{p}'."
+        if chk["suggestions"]:
+            msg += " Closest: " + ", ".join(chk["suggestions"])
+        msg += f" (see: main.py models -P {p}; or pass --no-validate)"
+        if as_json:
+            _emit_json({"error": msg, "exit_code": rc.USAGE, "provider": p, "model": model,
+                        "suggestions": chk["suggestions"]})
+        else:
+            console.print(f"[red]{msg}[/red]")
+        raise typer.Exit(rc.USAGE)
+    return chk
+
+
 # ── Crawl command ──────────────────────────────────────────────────────────────
 
 @app.command()
@@ -108,6 +139,7 @@ def crawl(
         False, "--dry-run", help="Validate inputs, config and provider; print the plan; no crawl."
     ),
     as_json: bool = typer.Option(False, "--json", help="Emit a JSON result on stdout."),
+    no_validate: bool = typer.Option(False, "--no-validate", help=NO_VALIDATE_HELP),
 ) -> None:
     """Start a new intelligent crawl session (LLM-driven: Ollama or an API provider)."""
     if verbose:
@@ -118,6 +150,7 @@ def crawl(
     if not start_url:
         _fail("No start URLs provided. Use --start-url/-u to specify at least one URL.",
               rc.USAGE, as_json)
+    _validate_model(_load_config_with_provider(config_path, provider), model, no_validate, as_json)
 
     asyncio.run(
         _run_crawl(
@@ -516,9 +549,11 @@ def resume(
         help="LLM provider: ollama | gemini | anthropic | openai | deepseek.",
     ),
     model: Optional[str] = typer.Option(None, "--model", "-m", help="Model override."),
+    no_validate: bool = typer.Option(False, "--no-validate", help=NO_VALIDATE_HELP),
 ) -> None:
     """Resume an interrupted crawl session."""
     _check_provider(provider)
+    _validate_model(_load_config_with_provider(config_path, provider), model, no_validate, False)
     asyncio.run(_resume_session(session_id, config_path, max_pages, max_depth, provider, model))
 
 
@@ -593,6 +628,8 @@ def research(
     ),
     verbose: bool = typer.Option(False, "--verbose", "-v", help="Debug logging."),
     dry_run: bool = typer.Option(False, "--dry-run", help="Validate and print the plan; no crawl."),
+    no_validate: bool = typer.Option(False, "--no-validate", help=NO_VALIDATE_HELP),
+    as_json: bool = typer.Option(False, "--json", help="Errors as JSON on stdout (dry-run is always JSON)."),
 ) -> None:
     """
     Crawl academic/P2P research sources and store papers in the central DB.
@@ -607,14 +644,18 @@ def research(
     if verbose:
         logging.getLogger().setLevel(logging.DEBUG)
     if not start_url:
-        _fail("No start URLs provided. Use --start-url/-u", rc.USAGE)
-    _check_provider(provider)
+        _fail("No start URLs provided. Use --start-url/-u", rc.USAGE, as_json)
+    _check_provider(provider, as_json)
+    cfg = _load_config_with_provider(config_path, provider)
+    model_check = _validate_model(cfg, model, no_validate, as_json or dry_run)
     if dry_run:
-        from llm.client import resolve_models
-        cfg = _load_config_with_provider(config_path, provider)
+        from llm.client import check_llm_ready, resolve_models
+        ready, why = asyncio.run(check_llm_ready(cfg))
         _emit_json({"dry_run": True, "goal": goal, "start_urls": start_url,
                     "provider": cfg.llm.provider,
                     "models": resolve_models(cfg, cfg.llm.provider, model),
+                    "model_check": model_check,
+                    "provider_ready": ready, "provider_problem": why or None,
                     "max_pages": max_pages or cfg.crawl.max_pages,
                     "max_depth": max_depth or cfg.crawl.max_depth,
                     "db_path": cfg.storage.db_path})
@@ -905,6 +946,7 @@ def llm_ping(
     config_path: Optional[Path] = typer.Option(None, "--config", "-c"),
     dry_run: bool = typer.Option(False, "--dry-run", help="Show what would be called; no request."),
     as_json: bool = typer.Option(False, "--json", help="Emit JSON on stdout."),
+    no_validate: bool = typer.Option(False, "--no-validate", help=NO_VALIDATE_HELP),
 ) -> None:
     """Make ONE small LLM call to verify a provider/key; records tokens in llm_usage."""
     _check_provider(provider, as_json)
@@ -921,9 +963,11 @@ def llm_ping(
         target = resolve_models(cfg, name)["extractor_model"]
     else:
         target = cfg.llm.model or default_model(name)
+    model_check = _validate_model(cfg, model, no_validate, as_json)
     ready, why = asyncio.run(check_llm_ready(cfg))
     if dry_run:
         out = {"dry_run": True, "provider": name, "model": target, "ready": ready,
+               "model_check": model_check,
                "problem": why or None, "prompt": prompt}
         if as_json:
             _emit_json(out)
@@ -956,6 +1000,61 @@ def llm_ping(
         _emit_json(out)
     else:
         console.print(out)
+
+
+# ── Models command ─────────────────────────────────────────────────────────────
+
+@app.command()
+def models(
+    provider: Optional[str] = typer.Option(None, "--provider", "-P",
+                                           help="Only this provider (default: all)."),
+    refresh: bool = typer.Option(False, "--refresh", help="Bypass the ~10 min cache."),
+    config_path: Optional[Path] = typer.Option(None, "--config", "-c"),
+    as_json: bool = typer.Option(False, "--json", help="Emit JSON on stdout."),
+) -> None:
+    """Live model list per provider (status, models, defaults). Keys are never shown."""
+    _check_provider(provider, as_json)
+    from config import load_config
+    from llm.models import list_models
+    from llm.providers import PROVIDERS
+    cfg = load_config(config_path)
+    names = [provider.lower()] if provider else list(PROVIDERS)
+
+    async def _all():
+        return await asyncio.gather(*[
+            list_models(p, refresh=refresh,
+                        base_url=cfg.ollama.base_url if p == "ollama"
+                        else (cfg.llm.base_url if cfg.llm.provider == p else None))
+            for p in names])
+
+    results = asyncio.run(_all())
+    for r in results:
+        ids = {m["id"] for m in r["models"]}
+        r["default_model_listed"] = (r["default_model"] in ids) if ids else None
+        r["active"] = r["provider"] == cfg.llm.provider
+    out = {"active_provider": cfg.llm.provider, "providers": results}
+    if as_json:
+        _emit_json(out)
+    else:
+        table = Table(title="LLM providers")
+        for col in ("provider", "status", "default", "models"):
+            table.add_column(col)
+        for r in results:
+            status = ("no key (" + "/".join(_key_names(r["provider"])) + ")" if not r["configured"]
+                      else ("error: " + r["error"][:60]) if r["error"] else "ok")
+            table.add_row(r["provider"] + (" *" if r["active"] else ""), status,
+                          r["default_model"], str(len(r["models"])))
+        console.print(table)
+        for r in results:
+            if r["models"]:
+                console.print(f"[bold]{r['provider']}[/bold]: " + ", ".join(m["id"] for m in r["models"]))
+    if provider and results[0]["error"]:
+        raise typer.Exit(rc.DEPENDENCY)
+
+
+def _key_names(provider: str) -> tuple[str, ...]:
+    from llm.providers import KEY_ENV
+    return KEY_ENV.get(provider, ()) or ("ollama not reachable",)
 
 
 # ── Doctor command ─────────────────────────────────────────────────────────────

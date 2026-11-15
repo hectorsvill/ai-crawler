@@ -154,6 +154,34 @@ vim ~/.config/ai-crawler/env        # add a line:  GEMINI_API_KEY=...
 `crawl --json` result includes `provider` and `llm_usage` (token totals for that session).
 A missing key or unreachable Ollama exits **3** before any crawling.
 
+### Choosing a model (live lists)
+
+```bash
+.venv/bin/python main.py models --json                 # every provider: configured, default, models
+.venv/bin/python main.py models -P gemini --json       # one provider (live API list, cached ~10 min)
+.venv/bin/python main.py models -P gemini --refresh --json
+```
+
+Each provider entry: `provider, configured, env_var, models[{id,name}], default_model,
+role_defaults, default_model_listed, active, error, cached`. A missing key is
+`configured: false` (exit 0), never an error; keys are never printed. Lists come from the
+provider APIs: Gemini `ListModels` (only `generateContent` models), OpenAI `/v1/models`,
+Anthropic `/v1/models`, DeepSeek `/models`, Ollama `/api/tags`.
+
+`-P/--provider` and `-m/--model` work the same on every LLM command (`crawl`, `research`,
+`resume`, `llm-ping`). Before any live call, `-m` is checked against the live list; an
+unknown name exits **2** with the closest matches, e.g.:
+
+```json
+{"error": "Unknown model 'gemini-3.5-flsh' for provider 'gemini'. Closest: gemini-3.5-flash, ...",
+ "exit_code": 2, "provider": "gemini", "model": "gemini-3.5-flsh", "suggestions": ["gemini-3.5-flash"]}
+```
+
+Skip the check with `--no-validate` (e.g. a model the list doesn't show yet). If the list
+can't be fetched (no key, provider down) nothing is decided there; the readiness check
+then exits 3. Note: a model can be listed and still be unavailable to a given key
+(e.g. `gemini-2.5-flash-lite` returns 404 for new Gemini users) — `llm-ping -m` confirms.
+
 ### Token usage
 
 Every LLM call is recorded in table `llm_usage` (same SQLite file as sessions,
@@ -179,7 +207,14 @@ llm_usage(id, ts UTC, run_id, provider, model, purpose, prompt_tokens, completio
 
 The `crewai` workflow still talks to Ollama directly (CrewAI's own LLM wrapper).
 LLM data lives in `crawl_data.db` (separate from the radar DB).
-The `web` dashboard (`main.py web`) is for humans; agents should use the CLI.
+The `web` dashboard (`main.py web --port 8420`) is for humans; agents should use the CLI.
+It has a provider dropdown (only configured providers are selectable; others show "no key"),
+a model dropdown filled from the live list, a Research workflow option, and a token-usage
+panel. JSON endpoints (keys never sent to the browser):
+`GET /api/models` (provider status), `GET /api/models?provider=gemini` (live list),
+`GET /api/usage?run_id=&provider=&model=&since=&group_by=model`,
+`POST /api/crawl {goal, start_url, workflow, provider, model, no_validate}` (400 + `suggestions`
+for an unknown model; response has `usage_url` for per-run tokens).
 
 ## Tests
 

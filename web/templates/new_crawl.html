@@ -59,6 +59,7 @@
           <option value="simple">Simple</option>
           <option value="langgraph">LangGraph</option>
           <option value="crewai">CrewAI</option>
+          <option value="research">Research (academic papers)</option>
         </select>
       </div>
       <div>
@@ -77,29 +78,50 @@
       </div>
     </div>
 
-    <!-- Model overrides -->
+    <!-- LLM provider + model (lists come from /api/models; API keys stay on the server) -->
     <div class="grid grid-cols-1 sm:grid-cols-2 gap-4">
       <div>
-        <label class="block text-sm text-gray-400 mb-1.5">Navigator Model</label>
-        <select name="navigator_model"
-                class="w-full px-3 py-2.5 bg-surface border border-gray-700 rounded text-sm text-gray-100
+        <label class="block text-sm text-gray-400 mb-1.5">LLM Provider</label>
+        <select name="provider" id="provider-select" class="w-full px-3 py-2.5 bg-surface border border-gray-700 rounded text-sm text-gray-100
                        font-mono focus:outline-none focus:border-cyan-electric/50 transition-colors">
-          {% for m in models %}
-          <option value="{{ m }}" {% if m == default_nav_model %}selected{% endif %}>{{ m }}</option>
-          {% endfor %}
+          <option value="">Loading…</option>
         </select>
       </div>
       <div>
-        <label class="block text-sm text-gray-400 mb-1.5">Extractor Model</label>
-        <select name="extractor_model"
-                class="w-full px-3 py-2.5 bg-surface border border-gray-700 rounded text-sm text-gray-100
+        <label class="block text-sm text-gray-400 mb-1.5">Model <span id="model-status" class="text-xs text-gray-600"></span></label>
+        <select name="model" id="model-select" class="w-full px-3 py-2.5 bg-surface border border-gray-700 rounded text-sm text-gray-100
                        font-mono focus:outline-none focus:border-cyan-electric/50 transition-colors">
-          {% for m in models %}
-          <option value="{{ m }}" {% if m == default_ext_model %}selected{% endif %}>{{ m }}</option>
-          {% endfor %}
+          <option value="">(provider default)</option>
         </select>
       </div>
     </div>
+
+    <!-- Ollama per-role overrides (only used when provider = ollama) -->
+    <details id="ollama-roles" class="text-sm text-gray-400">
+      <summary class="cursor-pointer text-xs text-gray-500">Ollama per-role models</summary>
+      <div class="grid grid-cols-1 sm:grid-cols-2 gap-4 mt-3">
+        <div>
+          <label class="block text-sm text-gray-400 mb-1.5">Navigator Model</label>
+          <select name="navigator_model" class="w-full px-3 py-2.5 bg-surface border border-gray-700 rounded text-sm text-gray-100
+                       font-mono focus:outline-none focus:border-cyan-electric/50 transition-colors">
+            <option value="">(config default)</option>
+            {% for m in models %}
+            <option value="{{ m }}">{{ m }}</option>
+            {% endfor %}
+          </select>
+        </div>
+        <div>
+          <label class="block text-sm text-gray-400 mb-1.5">Extractor Model</label>
+          <select name="extractor_model" class="w-full px-3 py-2.5 bg-surface border border-gray-700 rounded text-sm text-gray-100
+                       font-mono focus:outline-none focus:border-cyan-electric/50 transition-colors">
+            <option value="">(config default)</option>
+            {% for m in models %}
+            <option value="{{ m }}">{{ m }}</option>
+            {% endfor %}
+          </select>
+        </div>
+      </div>
+    </details>
 
     <!-- Submit -->
     <div class="flex flex-wrap items-center gap-3 pt-2">
@@ -119,16 +141,91 @@
 
   <!-- Result / redirect -->
   <div id="form-result" class="mt-4"></div>
+
+  <!-- Token usage panel (GET /api/usage) -->
+  <div class="mt-8 p-4 rounded border border-gray-700 bg-surface">
+    <div class="flex items-center justify-between mb-2">
+      <h2 class="text-sm font-semibold text-gray-300">LLM token usage</h2>
+      <button type="button" id="usage-refresh" class="text-xs text-gray-500 hover:text-cyan-electric">refresh</button>
+    </div>
+    <div id="usage-panel" class="text-xs font-mono text-gray-400">Loading…</div>
+  </div>
 </div>
 
 {% endblock %}
 
 {% block extra_scripts %}
 <script>
+const provSel = document.getElementById('provider-select');
+const modelSel = document.getElementById('model-select');
+const modelStatus = document.getElementById('model-status');
+
+function opt(value, label, disabled) {
+  const o = document.createElement('option');
+  o.value = value; o.textContent = label; o.disabled = !!disabled;
+  return o;
+}
+
+async function loadProviders() {
+  const r = await fetch('/api/models');
+  const data = await r.json();
+  provSel.innerHTML = '';
+  for (const p of data.providers) {
+    const label = p.configured ? `${p.provider}  (default: ${p.default_model})` : `${p.provider} — ${p.status}`;
+    provSel.appendChild(opt(p.configured ? p.provider : '', label, !p.configured));
+  }
+  const active = data.providers.find(p => p.provider === data.active_provider && p.configured)
+              || data.providers.find(p => p.configured);
+  if (active) { provSel.value = active.provider; await loadModels(active.provider); }
+}
+
+async function loadModels(provider) {
+  modelSel.innerHTML = '';
+  modelSel.appendChild(opt('', '(provider default)'));
+  document.getElementById('ollama-roles').style.display = provider === 'ollama' ? '' : 'none';
+  if (!provider) return;
+  modelStatus.textContent = 'loading…';
+  const r = await fetch('/api/models?provider=' + encodeURIComponent(provider));
+  const data = await r.json();
+  if (data.error) { modelStatus.textContent = 'list unavailable'; return; }
+  for (const m of data.models) {
+    const tag = m.id === data.default_model ? ' (default)' :
+                (Object.values(data.role_defaults || {}).includes(m.id) ? ' (extractor default)' : '');
+    modelSel.appendChild(opt(m.id, m.id + tag));
+  }
+  modelStatus.textContent = `${data.models.length} models${data.cached ? ' · cached' : ''}`;
+}
+provSel.addEventListener('change', () => loadModels(provSel.value));
+
+function fmt(n) { return (n ?? 0).toLocaleString(); }
+async function loadUsage() {
+  const el = document.getElementById('usage-panel');
+  try {
+    const r = await fetch('/api/usage?group_by=model&limit=5');
+    const d = await r.json();
+    const t = d.totals;
+    let html = `<div>calls ${fmt(t.calls)} · tokens ${fmt(t.total_tokens)} (in ${fmt(t.prompt_tokens)} / out ${fmt(t.completion_tokens)})` +
+               (t.cost_usd != null ? ` · ~$${t.cost_usd}` : '') + ` · errors ${fmt(t.errors)}</div>`;
+    html += '<table class="mt-2 w-full"><tr class="text-gray-500"><td>provider</td><td>model</td><td class="text-right">calls</td><td class="text-right">tokens</td></tr>';
+    for (const g of d.groups) {
+      html += `<tr><td>${g.provider}</td><td>${g.model}</td><td class="text-right">${fmt(g.calls)}</td><td class="text-right">${fmt(g.total_tokens)}</td></tr>`;
+    }
+    el.innerHTML = html + '</table>';
+  } catch (e) { el.textContent = 'usage unavailable'; }
+}
+document.getElementById('usage-refresh').addEventListener('click', loadUsage);
+loadProviders(); loadUsage();
+
 // When API returns session_id, redirect to session detail
 document.getElementById('crawl-form').addEventListener('htmx:afterRequest', function(e) {
   try {
     const data = JSON.parse(e.detail.xhr.responseText);
+    if (data.error) {
+      const sugg = (data.suggestions || []).length ? ' Closest: ' + data.suggestions.join(', ') : '';
+      document.getElementById('form-result').textContent = data.error + sugg;
+      return;
+    }
+    if (data.detail) { document.getElementById('form-result').textContent = data.detail; return; }
     if (data.session_id) {
       document.getElementById('form-result').innerHTML =
         `<div class="p-3 rounded border border-green-ok/30 bg-green-ok/5 text-green-ok text-sm font-mono">
