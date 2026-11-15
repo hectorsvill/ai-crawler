@@ -54,6 +54,7 @@ class Seed:
     max_items: int = 10
     require_match: bool = False     # only keep items whose title/desc match a topic
     name: str | None = None
+    feed_only: bool = False         # store feed entries without fetching article pages
 
 
 @dataclass
@@ -64,6 +65,7 @@ class CrawlParams:
     delay: float = 2.0              # min seconds between requests to the same domain
     timeout: float = 20.0
     recent_days: int | None = 7     # drop feed items older than this (None = keep all)
+    max_crawl_delay: float = 30.0   # robots Crawl-delay above this => one request per domain
     user_agent: str = DEFAULT_UA
     topics: list[str] | None = None  # only seeds carrying one of these topics
 
@@ -168,6 +170,8 @@ class RadarCrawler:
         self.counters = {"fetched": 0, "stored": 0, "failed": 0, "skipped": 0, "feed_only": 0,
                          "inserted": 0, "updated": 0, "unchanged": 0, "duplicate_content": 0}
         self._http_fail: dict[str, int] = {}
+        self._delay_skipped: set[str] = set()
+        self._touched: set[str] = set()
         self.errors: list[dict[str, str]] = []
         self.skips: list[dict[str, str]] = []
         self.domains: set[str] = set()
@@ -203,6 +207,15 @@ class RadarCrawler:
             self.counters["skipped"] += 1
             self.skips.append({"url": url, "reason": "robots.txt"})
             return None
+        if crawl_delay and crawl_delay > self.p.max_crawl_delay and \
+                domain_of(url) in self._touched:
+            # Honour a very long Crawl-delay by not making a 2nd request this run
+            # (instead of blocking a concurrency slot for minutes).
+            self.counters["skipped"] += 1
+            self.skips.append({"url": url, "reason": f"crawl-delay {crawl_delay:g}s"})
+            self._delay_skipped.add(url)
+            return None
+        self._touched.add(domain_of(url))
         self._budget -= 1
         await throttle.wait(url, crawl_delay)
         try:
@@ -239,9 +252,10 @@ class RadarCrawler:
         self.counters[action] += 1
         return meta
 
-    def _store_feed_only(self, url: str, status: int, seed: Seed, hint: dict, run_id: int) -> None:
-        """Article page refused us (e.g. 403) but the permitted feed described it:
-        keep the feed's title/date/summary so the item is still queryable (no body text)."""
+    def _store_feed_only(self, url: str, status: int | None, seed: Seed, hint: dict, run_id: int) -> None:
+        """Store a feed entry without its article body: the article refused us (e.g. 403),
+        robots Crawl-delay is too long for a 2nd request, or the seed is ``feed_only``.
+        Keeps title/date/summary so the item is still queryable."""
         tags = set(seed.topics) | set(tag_text(hint.get("title"), hint.get("description")))
         page = {
             "url": url, "canonical_url": None, "domain": domain_of(url),
@@ -252,6 +266,7 @@ class RadarCrawler:
         }
         _, action = self.db.upsert_page(page, sorted(tags), run_id)
         self.counters["feed_only"] += 1
+        self.counters["stored"] += 1
         self.counters[action] += 1
 
     def _recent(self, iso: str | None) -> bool:
@@ -284,6 +299,13 @@ class RadarCrawler:
             meta = self._store(normalize_url(seed.url), status, text, seed, {}, run_id)
             candidates = [(l, {}) for l in meta["links"] if is_article_link(l, seed.url)]
 
+        if seed.feed_only:
+            for u, h in candidates[: seed.max_items]:
+                if u not in self._seen and h.get("title"):
+                    self._seen.add(u)
+                    self._store_feed_only(u, None, seed, h, run_id)
+            return
+
         frontier = [(u, h, 1) for u, h in candidates[: seed.max_items]]
         while frontier and self._budget > 0:
             url, hint, depth = frontier.pop(0)
@@ -293,8 +315,8 @@ class RadarCrawler:
             async with sem:
                 res = await self._fetch(session, robots, throttle, url)
             if not res:
-                if url in self._http_fail and hint.get("title"):
-                    self._store_feed_only(url, self._http_fail[url], seed, hint, run_id)
+                if hint.get("title") and (url in self._http_fail or url in self._delay_skipped):
+                    self._store_feed_only(url, self._http_fail.get(url), seed, hint, run_id)
                 continue
             status, ctype, html = res
             if "html" not in ctype and "xml" not in ctype and "text" not in ctype:

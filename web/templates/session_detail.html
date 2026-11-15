@@ -292,6 +292,12 @@
 
 </div>
 
+<!-- Per-run LLM token usage (GET /api/usage?run_id=) -->
+<div class="bg-surface rounded-lg border border-gray-800 p-4 mt-5">
+  <h2 class="text-sm font-semibold text-gray-300 mb-2">LLM token usage (this run)</h2>
+  <div id="run-usage" class="text-xs font-mono text-gray-400">Loading…</div>
+</div>
+
 {% endblock %}
 
 {% block extra_scripts %}
@@ -299,6 +305,17 @@
 <script>
 (function() {
   const sessionId = "{{ session.id }}";
+  (async function loadRunUsage() {
+    const el = document.getElementById('run-usage');
+    try {
+      const d = await (await fetch('/api/usage?group_by=model&limit=0&run_id=' + encodeURIComponent(sessionId))).json();
+      const t = d.totals;
+      if (!t.calls) { el.textContent = 'No LLM calls recorded for this run.'; return; }
+      el.innerHTML = `calls ${t.calls} · tokens ${t.total_tokens.toLocaleString()} (in ${t.prompt_tokens.toLocaleString()} / out ${t.completion_tokens.toLocaleString()})` +
+        (t.cost_usd != null ? ` · ~$${t.cost_usd}` : '') +
+        d.groups.map(g => `<div>${g.provider} / ${g.model}: ${g.calls} calls, ${g.total_tokens.toLocaleString()} tokens</div>`).join('');
+    } catch (e) { el.textContent = 'usage unavailable'; }
+  })();
   const es = new EventSource('/api/live/' + sessionId);
   const statusText = document.getElementById('live-status-text');
   const logsPanel = document.getElementById('logs-panel');

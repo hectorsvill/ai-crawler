@@ -107,7 +107,8 @@ class WorkflowRouter:
     def __init__(self, llm: OllamaClient | None = None) -> None:
         if llm is None:
             from config import load_config
-            llm = OllamaClient(load_config().ollama)
+            from llm.client import make_llm_client
+            llm = make_llm_client(load_config(), record_usage=False)
         self._llm = llm
 
     async def select(self, goal: str) -> RouterDecision:

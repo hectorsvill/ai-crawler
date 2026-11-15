@@ -28,7 +28,8 @@ from agents.research_extractor import ResearchExtractorAgent
 from config import AppConfig
 from crawler.engine import fetch_page
 from crawler.respectful import RespectfulCrawler
-from llm.client import OllamaClient
+from llm.client import make_llm_client
+from llm.usage import set_current_run
 from storage.db import (
     create_crawl_session,
     dequeue_next_url,
@@ -99,21 +100,7 @@ async def run_research(
     await init_research_fts(engine)
 
     # Setup LLM
-    llm_config = config.ollama
-    if model:
-        from pydantic import BaseModel as _BM
-
-        class _Patched(_BM):
-            base_url: str = llm_config.base_url
-            navigator_model: str = llm_config.navigator_model
-            extractor_model: str = model
-            router_model: str = llm_config.router_model
-            timeout: int = llm_config.timeout
-            max_retries: int = llm_config.max_retries
-
-        llm_config = _Patched()
-
-    llm = OllamaClient(llm_config)
+    llm = make_llm_client(config, model=model)
     navigator = NavigatorAgent(llm)
     extractor = ResearchExtractorAgent(llm)
     respectful = RespectfulCrawler(config.crawl)
@@ -132,6 +119,7 @@ async def run_research(
             await enqueue_url(URLItem(url=normalize_url(url), session_id=session_id, depth=0))
     else:
         logger.info("Resuming research session %s", session_id)
+    set_current_run(session_id)
 
     stats = SessionStats()
     visited_urls: list[str] = []
@@ -213,6 +201,10 @@ async def run_research(
                         goal=goal,
                         content_hash=page.content_hash,
                     )
+                    # Publisher citation_* meta tags are authoritative (markdown often drops
+                    # author lists, e.g. arXiv) — correct/fill the LLM's fields with them.
+                    from utils.citation_meta import merge_into_paper, parse_citation_meta
+                    paper_data = merge_into_paper(paper_data, parse_citation_meta(page.raw_html))
                     if paper_data.confidence >= 0.3:
                         paper_id = await save_research_paper(
                             paper_data=paper_data,
@@ -234,8 +226,12 @@ async def run_research(
             if decision.action == "complete":
                 break
 
+            progress.update(stats)  # refreshes elapsed_seconds before persisting
             await update_session_stats(session_id, stats.model_dump())
-            progress.update(stats)
+
+        # Final stats: the loop can exit via break ("complete"), so persist here too
+        progress.update(stats)
+        await update_session_stats(session_id, stats.model_dump())
 
     await finish_crawl_session(session_id, SessionStatus.completed)
 

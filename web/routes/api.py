@@ -378,6 +378,9 @@ class CrawlRequest(BaseModel):
     max_depth: int | None = None
     navigator_model: str | None = None
     extractor_model: str | None = None
+    provider: str | None = None   # ollama | gemini | anthropic | openai | deepseek
+    model: str | None = None      # API providers: all roles; Ollama: extractor model
+    no_validate: bool = False
 
 
 @router.post("/crawl")
@@ -396,12 +399,32 @@ async def api_start_crawl(request: Request):
                     body[field] = int(body[field])
                 except (ValueError, TypeError):
                     body.pop(field, None)
-    req = CrawlRequest(**{k: v for k, v in body.items() if hasattr(CrawlRequest.model_fields, k) or k in CrawlRequest.model_fields})
+    if isinstance(body.get("no_validate"), str):
+        body["no_validate"] = body["no_validate"].lower() in ("1", "true", "on", "yes")
+    req = CrawlRequest(**{k: v for k, v in body.items() if k in CrawlRequest.model_fields})
+    if req.workflow not in ("auto", "simple", "langgraph", "crewai", "research"):
+        raise HTTPException(400, f"Unknown workflow '{req.workflow}'")
+    from llm.providers import PROVIDERS
+    config = request.app.state.config
+    provider = (req.provider or config.llm.provider).lower()
+    if provider not in PROVIDERS:
+        raise HTTPException(400, f"Unknown provider '{provider}'. Choose from: {', '.join(PROVIDERS)}")
+    if provider != "ollama":
+        from llm.providers import api_key_for
+        if not api_key_for(provider)[0]:
+            raise HTTPException(400, f"Provider '{provider}' has no API key configured on the server")
+    if req.model and not req.no_validate:
+        from llm.models import check_model, list_models
+        listing = await list_models(provider, base_url=_base_url_for(config, provider))
+        chk = check_model(listing, req.model)
+        if chk["valid"] is False:
+            return JSONResponse(status_code=400, content={
+                "error": f"Unknown model '{req.model}' for provider '{provider}'",
+                "provider": provider, "model": req.model, "suggestions": chk["suggestions"]})
     from storage.db import create_crawl_session, enqueue_url
     from storage.models import URLItem
     from utils.url import normalize_url
 
-    config = request.app.state.config
     session_id = await create_crawl_session(
         goal=req.goal,
         workflow_used=req.workflow if req.workflow != "auto" else "simple",
@@ -422,10 +445,20 @@ async def api_start_crawl(request: Request):
             navigator_model=req.navigator_model,
             extractor_model=req.extractor_model,
             running_crawls=request.app.state.running_crawls,
+            provider=provider,
+            model=req.model,
         )
     )
     request.app.state.running_crawls[session_id] = task
-    return {"session_id": session_id, "status": "started"}
+    return {"session_id": session_id, "status": "started", "workflow": req.workflow,
+            "provider": provider, "model": req.model,
+            "usage_url": f"/api/usage?run_id={session_id}"}
+
+
+def _base_url_for(config: Any, provider: str) -> str | None:
+    if provider == "ollama":
+        return config.ollama.base_url
+    return config.llm.base_url if config.llm.provider == provider else None
 
 
 async def _run_crawl_background(
@@ -439,37 +472,31 @@ async def _run_crawl_background(
     navigator_model: str | None,
     extractor_model: str | None,
     running_crawls: dict,
+    provider: str | None = None,
+    model: str | None = None,
 ) -> None:
     try:
         await insert_crawl_log(session_id, f"Starting: {goal}", component="workflow")
 
-        # Apply model overrides if requested
-        run_config = config
-        if navigator_model or extractor_model:
-            from pydantic import BaseModel as PydanticBase
-            class _PatchedOllama(PydanticBase):
-                base_url: str = config.ollama.base_url
-                navigator_model: str = navigator_model or config.ollama.navigator_model
-                extractor_model: str = extractor_model or config.ollama.extractor_model
-                router_model: str = config.ollama.router_model
-                timeout: int = config.ollama.timeout
-                max_retries: int = config.ollama.max_retries
-
-            from config import AppConfig
-            run_config = AppConfig(
-                ollama=_PatchedOllama(),
-                crawl=config.crawl,
-                storage=config.storage,
-                workflow=config.workflow,
-            )
+        # Per-run copy of the config: provider + model overrides never leak into app state
+        run_config = config.model_copy(deep=True)
+        if provider:
+            run_config.llm.provider = provider
+        if navigator_model:
+            run_config.ollama.navigator_model = navigator_model
+        if extractor_model:
+            run_config.ollama.extractor_model = extractor_model
+        await insert_crawl_log(
+            session_id, f"LLM provider={run_config.llm.provider} model={model or 'default'}",
+            component="web")
 
         # Select workflow
         selected = workflow
-        if workflow == "auto":
+        if workflow == "auto":  # (research is explicit, never routed)
             try:
-                from llm.client import OllamaClient
+                from llm.client import make_llm_client
                 from workflows.router import select_workflow
-                llm = OllamaClient(run_config.ollama)
+                llm = make_llm_client(run_config)
                 selected, reasoning = await select_workflow(goal, llm)
                 await insert_crawl_log(
                     session_id,
@@ -489,9 +516,13 @@ async def _run_crawl_background(
             session_id=session_id,
             max_pages=max_pages,
             max_depth=max_depth,
+            model=model,
         )
 
-        if selected == "langgraph":
+        if selected == "research":
+            from workflows.research import run_research
+            await run_research(**kwargs)
+        elif selected == "langgraph":
             try:
                 from workflows.langgraph_flow import run_langgraph
                 await run_langgraph(**kwargs)
@@ -543,36 +574,61 @@ async def api_analyze_goal(request: Request):
         return {"workflow": "simple", "reasoning": "No goal provided — defaulting to simple."}
     config = request.app.state.config
     try:
-        from llm.client import OllamaClient
+        from llm.client import make_llm_client
         from workflows.router import select_workflow
-        llm = OllamaClient(config.ollama)
+        llm = make_llm_client(config)
         workflow, reasoning = await select_workflow(goal, llm)
         return {"workflow": workflow, "reasoning": reasoning}
     except Exception as exc:
         return {"workflow": "simple", "reasoning": f"Router unavailable: {exc}"}
 
 
-# ── Available Ollama models ───────────────────────────────────────────────────
+# ── LLM providers / models / usage (keys never leave the server) ────────────
 
 @router.get("/models")
-async def api_models(request: Request):
+async def api_models(request: Request, provider: str | None = Query(None),
+                     refresh: bool = Query(False)):
+    """No provider: status of every provider. With provider: its live model list."""
+    from llm.models import all_providers_status, list_models
+    from llm.providers import PROVIDERS
     config = request.app.state.config
+    if provider:
+        provider = provider.lower()
+        if provider not in PROVIDERS:
+            raise HTTPException(400, f"Unknown provider '{provider}'")
+        r = await list_models(provider, base_url=_base_url_for(config, provider),
+                              refresh=refresh, timeout=10)
+        ids = {m["id"] for m in r["models"]}
+        r["default_model_listed"] = (r["default_model"] in ids) if ids else None
+        return r
+    providers = await all_providers_status(with_models=False)
+    for p in providers:
+        if p["provider"] == "ollama":  # "configured" == reachable for the local server
+            r = await list_models("ollama", base_url=config.ollama.base_url, timeout=3)
+            p["configured"] = r["configured"] and not r["error"]
+        p["status"] = "ok" if p["configured"] else (
+            "not reachable" if p["provider"] == "ollama" else "no key")
+    return {"active_provider": config.llm.provider, "providers": providers}
+
+
+@router.get("/usage")
+async def api_usage(request: Request, provider: str | None = Query(None),
+                    model: str | None = Query(None), run_id: str | None = Query(None),
+                    since: str | None = Query(None), group_by: str = Query("model"),
+                    limit: int = Query(20, ge=0, le=500)):
+    """Token usage (llm_usage table): totals, groups and the most recent calls."""
+    from llm.usage import UsageStore
+    config = request.app.state.config
+    store = UsageStore(config.llm.usage_db_path or config.storage.db_path)
     try:
-        import aiohttp
-        async with aiohttp.ClientSession() as sess:
-            async with sess.get(
-                f"{config.ollama.base_url}/api/tags",
-                timeout=aiohttp.ClientTimeout(total=3),
-            ) as resp:
-                if resp.status == 200:
-                    data = await resp.json()
-                    return {"models": [m["name"] for m in data.get("models", [])]}
-    except Exception:
-        pass
-    return {
-        "models": [config.ollama.navigator_model, config.ollama.extractor_model],
-        "fallback": True,
-    }
+        out = store.summary(provider=provider, model=model, since=since, run_id=run_id,
+                            group_by=group_by or None)
+    except ValueError as exc:
+        raise HTTPException(400, str(exc))
+    out["recent"] = store.rows(provider=provider, model=model, since=since, run_id=run_id,
+                               limit=limit)
+    out.pop("db_path", None)
+    return out
 
 
 # ── Search ────────────────────────────────────────────────────────────────────

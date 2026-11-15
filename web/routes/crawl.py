@@ -50,9 +50,9 @@ async def analyze_goal(request: Request):
         return HTMLResponse('<p class="text-gray-500 text-sm">Enter a goal to analyse.</p>')
     config = request.app.state.config
     try:
-        from llm.client import OllamaClient
+        from llm.client import make_llm_client
         from workflows.router import select_workflow
-        llm = OllamaClient(config.ollama)
+        llm = make_llm_client(config)
         workflow, reasoning = await select_workflow(goal, llm)
     except Exception as exc:
         workflow, reasoning = "simple", f"Router unavailable ({exc}) — defaulting to simple."
