@@ -63,8 +63,8 @@ class ResearchExtractorAgent:
     def __init__(self, llm: "OllamaClient | None" = None) -> None:
         if llm is None:
             from config import load_config
-            from llm.client import OllamaClient as _OC
-            llm = _OC(load_config().ollama)
+            from llm.client import make_llm_client
+            llm = make_llm_client(load_config(), record_usage=False)
         self.llm = llm
 
     async def extract(

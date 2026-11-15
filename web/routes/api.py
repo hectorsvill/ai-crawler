@@ -458,6 +458,7 @@ async def _run_crawl_background(
             from config import AppConfig
             run_config = AppConfig(
                 ollama=_PatchedOllama(),
+                llm=config.llm,
                 crawl=config.crawl,
                 storage=config.storage,
                 workflow=config.workflow,
@@ -467,9 +468,9 @@ async def _run_crawl_background(
         selected = workflow
         if workflow == "auto":
             try:
-                from llm.client import OllamaClient
+                from llm.client import make_llm_client
                 from workflows.router import select_workflow
-                llm = OllamaClient(run_config.ollama)
+                llm = make_llm_client(run_config)
                 selected, reasoning = await select_workflow(goal, llm)
                 await insert_crawl_log(
                     session_id,
@@ -543,9 +544,9 @@ async def api_analyze_goal(request: Request):
         return {"workflow": "simple", "reasoning": "No goal provided — defaulting to simple."}
     config = request.app.state.config
     try:
-        from llm.client import OllamaClient
+        from llm.client import make_llm_client
         from workflows.router import select_workflow
-        llm = OllamaClient(config.ollama)
+        llm = make_llm_client(config)
         workflow, reasoning = await select_workflow(goal, llm)
         return {"workflow": workflow, "reasoning": reasoning}
     except Exception as exc:

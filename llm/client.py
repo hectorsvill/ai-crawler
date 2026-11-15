@@ -1,5 +1,8 @@
 """
-llm/client.py — Ollama client wrapper.
+llm/client.py — Provider-agnostic LLM client (Ollama, Gemini, Claude, OpenAI, DeepSeek).
+
+Build one with ``make_llm_client(config, provider=..., model=...)``. The class
+is still importable as ``OllamaClient`` for backwards compatibility.
 
 Responsibilities:
   - Model selection and switching (navigator / extractor / router models)
@@ -17,6 +20,7 @@ import asyncio
 import hashlib
 import json
 import logging
+import sys
 import time
 from typing import Any, TypeVar
 
@@ -190,27 +194,64 @@ async def _call_ollama_http(
 
 # ── Main client class ──────────────────────────────────────────────────────────
 
-class OllamaClient:
+class ChatClient:
     """
-    Async wrapper around Ollama for structured LLM calls.
+    Async provider-agnostic wrapper for structured LLM calls.
 
     Usage:
-        client = OllamaClient(config.ollama)
+        client = make_llm_client(config)               # provider from config/env
+        client = make_llm_client(config, provider="gemini", model="gemini-2.5-flash")
         result = await client.structured_call(
             model=client.extractor_model,
             system_prompt=EXTRACT_SYSTEM,
             user_content=page_markdown,
             response_schema=ExtractionResult,
         )
+
+    Every call records provider-reported token usage (or a flagged tiktoken
+    estimate) in the in-memory ``token_usage`` tracker and, when a
+    ``usage_store`` is attached, in the ``llm_usage`` SQLite table.
     """
 
-    def __init__(self, config: Any) -> None:
-        self.base_url: str = config.base_url
+    def __init__(
+        self,
+        config: Any,
+        *,
+        provider: Any = None,
+        usage_store: Any = None,
+        prices: dict[str, Any] | None = None,
+    ) -> None:
+        from llm.providers import make_provider
+
+        self.base_url: str = getattr(config, "base_url", None) or "http://localhost:11434"
         self.navigator_model: str = config.navigator_model
         self.extractor_model: str = config.extractor_model
         self.router_model: str = config.router_model
         self.timeout: int = config.timeout
         self.max_retries: int = config.max_retries
+        self.provider = provider or make_provider("ollama", self.base_url, self.timeout)
+        self.provider_name: str = self.provider.name
+        self.usage_store = usage_store
+        self.prices = prices or {}
+        self.last_response: Any = None
+
+    def _record(self, model: str, purpose: str | None, pt: int, ct: int, total: int | None,
+                estimated: bool, latency_ms: int | None, ok: bool = True,
+                error: str | None = None) -> None:
+        from llm.usage import estimate_cost
+        if ok:
+            token_usage.add(model, pt, ct, provider=self.provider_name)
+        if self.usage_store is None:
+            return
+        try:
+            self.usage_store.record(
+                provider=self.provider_name, model=model, purpose=purpose,
+                prompt_tokens=pt, completion_tokens=ct, total_tokens=total, estimated=estimated,
+                cost_usd=estimate_cost(self.prices, model, pt, ct) if ok else None,
+                latency_ms=latency_ms, ok=ok, error=error,
+            )
+        except Exception as exc:  # usage logging must never break a crawl
+            logger.warning("Could not persist LLM usage: %s", exc)
 
     async def raw_call(
         self,
@@ -218,46 +259,53 @@ class OllamaClient:
         messages: list[dict[str, str]],
         *,
         attempt: int = 0,
+        purpose: str | None = None,
+        json_mode: bool = False,
     ) -> str:
         """
-        Send a chat completion request to Ollama.
-        Retries with exponential backoff on failure.
+        Send a chat request to the configured provider.
+        Retries with exponential backoff on failure (not on a missing API key).
         Falls back to navigator_model if extractor_model fails.
         """
+        from llm.providers import MissingAPIKey
+
         backoff = 2.0 ** attempt
-
-        # Build prompt string for token accounting
-        _prompt_str = " ".join(m.get("content", "") for m in messages)
-
         try:
-            if HAS_OLLAMA:
-                client = _ollama.AsyncClient(host=self.base_url)
-                response = await asyncio.wait_for(
-                    client.chat(model=model, messages=messages),
-                    timeout=self.timeout,
-                )
-                raw = response["message"]["content"]
-            else:
-                raw = await _call_ollama_http(self.base_url, model, messages, self.timeout)
-
-            token_usage.record(model, _prompt_str, raw)
-            return raw
-
+            resp = await asyncio.wait_for(
+                self.provider.chat(model, messages, json_mode=json_mode),
+                timeout=self.timeout + 5,
+            )
+        except MissingAPIKey:
+            raise
         except (asyncio.TimeoutError, Exception) as exc:  # noqa: BLE001
-            logger.warning("LLM call failed (attempt %d): %s", attempt + 1, exc)
+            msg = str(exc) or type(exc).__name__
+            logger.warning("LLM call failed (%s %s, attempt %d): %s",
+                           self.provider_name, model, attempt + 1, msg)
+            self._record(model, purpose, 0, 0, 0, False, None, ok=False, error=msg)
 
             if attempt < self.max_retries - 1:
                 await asyncio.sleep(backoff)
-                return await self.raw_call(model, messages, attempt=attempt + 1)
+                return await self.raw_call(model, messages, attempt=attempt + 1,
+                                           purpose=purpose, json_mode=json_mode)
 
             # Fallback to smaller model if primary was large
             if model == self.extractor_model and model != self.navigator_model:
                 logger.warning("Falling back to navigator model: %s", self.navigator_model)
-                return await self.raw_call(
-                    self.navigator_model, messages, attempt=0
-                )
+                return await self.raw_call(self.navigator_model, messages, attempt=0,
+                                           purpose=purpose, json_mode=json_mode)
 
-            raise RuntimeError(f"LLM call failed after {self.max_retries} retries: {exc}") from exc
+            raise RuntimeError(f"LLM call failed after {self.max_retries} retries: {msg}") from exc
+
+        self.last_response = resp
+        if resp.has_usage:
+            pt, ct, total, est = (resp.prompt_tokens, resp.completion_tokens,
+                                  resp.total_tokens, False)
+        else:
+            pt = count_tokens(" ".join(m.get("content", "") for m in messages))
+            ct = count_tokens(resp.text)
+            total, est = pt + ct, True
+        self._record(model, purpose, pt, ct, total, est, resp.latency_ms)
+        return resp.text
 
     async def structured_call(
         self,
@@ -305,7 +353,7 @@ class OllamaClient:
             {"role": "user", "content": user_content},
         ]
 
-        raw = await self.raw_call(model, messages)
+        raw = await self.raw_call(model, messages, purpose=schema_name, json_mode=True)
 
         if effective_cache_key:
             _cache.set(effective_cache_key, goal, model, raw)
@@ -323,7 +371,82 @@ class OllamaClient:
             {"role": "system", "content": system_prompt},
             {"role": "user", "content": user_content},
         ]
-        return await self.raw_call(model, messages)
+        return await self.raw_call(model, messages, purpose="simple_call")
+
+
+# Backwards-compatible name used throughout the codebase.
+OllamaClient = ChatClient
+
+
+# ── Model / client factory ─────────────────────────────────────────────────────
+
+def resolve_models(config: Any, provider: str, model: str | None = None) -> dict[str, str]:
+    """Role -> model for *provider*.
+
+    ollama: llm.<role> > ollama.<role> (keeps existing config working).
+    others: llm.<role> > --model / llm.model > provider default.
+    """
+    from llm.providers import DEFAULT_MODELS
+
+    llm_cfg = getattr(config, "llm", None)
+    roles = ("navigator_model", "extractor_model", "router_model")
+    out: dict[str, str] = {}
+    for role in roles:
+        explicit = getattr(llm_cfg, role, None) if llm_cfg else None
+        if provider == "ollama":
+            out[role] = explicit or (model if model and role == "extractor_model" else None) \
+                or getattr(config.ollama, role)
+        else:
+            out[role] = explicit or model or (llm_cfg.model if llm_cfg and llm_cfg.model else None) \
+                or DEFAULT_MODELS[provider]
+    return out
+
+
+def make_llm_client(
+    config: Any,
+    provider: str | None = None,
+    model: str | None = None,
+    *,
+    session_factory: Any = None,
+    record_usage: bool = True,
+) -> ChatClient:
+    """Build a ChatClient from AppConfig (+ optional CLI overrides)."""
+    from types import SimpleNamespace
+
+    from llm.providers import DEFAULT_BASE_URLS, make_provider
+    from llm.usage import UsageStore
+
+    llm_cfg = config.llm
+    name = (provider or llm_cfg.provider or "ollama").lower()
+    if name == "ollama":
+        base_url = llm_cfg.base_url or config.ollama.base_url
+        timeout, retries = config.ollama.timeout, config.ollama.max_retries
+    else:
+        base_url = llm_cfg.base_url or DEFAULT_BASE_URLS.get(name)
+        timeout, retries = llm_cfg.timeout, llm_cfg.max_retries
+    cfg = SimpleNamespace(base_url=base_url, timeout=timeout, max_retries=retries,
+                          **resolve_models(config, name, model))
+    prov = make_provider(name, base_url, timeout, session_factory)
+    store = UsageStore(llm_cfg.usage_db_path or config.storage.db_path) if record_usage else None
+    return ChatClient(cfg, provider=prov, usage_store=store, prices=llm_cfg.prices)
+
+
+async def check_llm_ready(config: Any, provider: str | None = None) -> tuple[bool, str]:
+    """(ready, reason). Ollama: reachable. API providers: key present (no network)."""
+    from llm.providers import KEY_ENV, api_key_for
+
+    name = (provider or config.llm.provider or "ollama").lower()
+    if name == "ollama":
+        base = config.llm.base_url or config.ollama.base_url
+        ok = await check_ollama_reachable(base)
+        return ok, "" if ok else f"Ollama unreachable at {base}"
+    if name not in KEY_ENV:
+        return False, f"Unknown provider '{name}'"
+    key, _ = api_key_for(name)
+    if not key:
+        return False, (f"{name}: missing API key — set {' or '.join(KEY_ENV[name])} "
+                       f"(env or ~/.config/ai-crawler/env)")
+    return True, ""
 
 
 # ── Response parsing ───────────────────────────────────────────────────────────
@@ -405,14 +528,27 @@ class TokenUsage:
         self._per_model: dict[str, dict[str, int]] = {}
 
     def record(self, model: str, prompt: str, completion: str) -> None:
-        pt = count_tokens(prompt)
-        ct = count_tokens(completion)
-        self.prompt_tokens += pt
-        self.completion_tokens += ct
-        bucket = self._per_model.setdefault(model, {"prompt": 0, "completion": 0})
-        bucket["prompt"] += pt
-        bucket["completion"] += ct
-        logger.debug("[tokens] model=%s prompt=%d completion=%d", model, pt, ct)
+        """Record an *estimated* call from raw text (tiktoken)."""
+        self.add(model, count_tokens(prompt), count_tokens(completion))
+
+    def add(self, model: str, prompt_tokens: int, completion_tokens: int,
+            provider: str | None = None) -> None:
+        """Record exact token counts (as reported by the provider)."""
+        key = f"{provider}:{model}" if provider and provider != "ollama" else model
+        self.prompt_tokens += prompt_tokens
+        self.completion_tokens += completion_tokens
+        bucket = self._per_model.setdefault(key, {"prompt": 0, "completion": 0, "calls": 0})
+        bucket["prompt"] += prompt_tokens
+        bucket["completion"] += completion_tokens
+        bucket["calls"] = bucket.get("calls", 0) + 1
+        logger.debug("[tokens] model=%s prompt=%d completion=%d", key, prompt_tokens,
+                     completion_tokens)
+
+    def as_dict(self) -> dict[str, Any]:
+        return {"prompt_tokens": self.prompt_tokens,
+                "completion_tokens": self.completion_tokens,
+                "total_tokens": self.prompt_tokens + self.completion_tokens,
+                "per_model": self._per_model}
 
     def summary(self) -> str:
         lines = [
@@ -551,13 +687,12 @@ class LLMClient:
         """Call the LLM and return the raw text response."""
         model = model or self.default_model
         messages = [{"role": "user", "content": prompt}]
-        raw = await self._client.raw_call(model, messages)
+        raw = await self._client.raw_call(model, messages, purpose="generate")
         pt = count_tokens(prompt)
         ct = count_tokens(raw)
         self.total_input_tokens += pt
         self.total_output_tokens += ct
-        token_usage.record(model, prompt, raw)
-        print(f"[tokens] model={model} prompt≈{pt} completion≈{ct}")
+        print(f"[tokens] model={model} prompt≈{pt} completion≈{ct}", file=sys.stderr)
         return raw
 
     async def generate_json(
@@ -594,7 +729,7 @@ class LLMClient:
             ct = count_tokens(str(result))
             self.total_input_tokens += pt
             self.total_output_tokens += ct
-            print(f"[tokens] model={model} prompt≈{pt} completion≈{ct}")
+            print(f"[tokens] model={model} prompt≈{pt} completion≈{ct}", file=sys.stderr)
             return result  # type: ignore[return-value]
 
         # Fallback: return plain dict
@@ -611,13 +746,13 @@ class LLMClient:
                 {"role": "system", "content": system},
                 {"role": "user", "content": user_content},
             ]
-            raw = await self._client.raw_call(model, messages)
+            raw = await self._client.raw_call(model, messages, purpose="generate_json",
+                                              json_mode=True)
             pt = count_tokens(user_content)
             ct = count_tokens(raw)
             self.total_input_tokens += pt
             self.total_output_tokens += ct
-            token_usage.record(model, user_content, raw)
-            print(f"[tokens] model={model} prompt≈{pt} completion≈{ct}")
+            print(f"[tokens] model={model} prompt≈{pt} completion≈{ct}", file=sys.stderr)
             try:
                 text = raw.strip()
                 if text.startswith("```"):

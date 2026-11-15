@@ -17,7 +17,8 @@ from agents.navigator import NavigatorAgent, summarize_history
 from config import AppConfig
 from crawler.engine import fetch_page
 from crawler.respectful import RespectfulCrawler
-from llm.client import OllamaClient
+from llm.client import make_llm_client
+from llm.usage import set_current_run
 from storage.db import (
     create_crawl_session,
     dequeue_next_url,
@@ -72,23 +73,8 @@ async def run_simple(
     effective_max_pages = max_pages or config.crawl.max_pages
     effective_max_depth = max_depth or config.crawl.max_depth
 
-    # Setup LLM client with optional model override
-    llm_config = config.ollama
-    if model:
-        # Monkey-patch for this run only (config is immutable Pydantic model)
-        from pydantic import BaseModel
-
-        class _PatchedOllama(BaseModel):
-            base_url: str = llm_config.base_url
-            navigator_model: str = llm_config.navigator_model
-            extractor_model: str = model
-            router_model: str = llm_config.router_model
-            timeout: int = llm_config.timeout
-            max_retries: int = llm_config.max_retries
-
-        llm_config = _PatchedOllama()
-
-    llm = OllamaClient(llm_config)
+    # Setup LLM client (provider from config/env; optional model override)
+    llm = make_llm_client(config, model=model)
     navigator = NavigatorAgent(llm)
     extractor = ExtractorAgent(llm)
     respectful = RespectfulCrawler(config.crawl)
@@ -105,6 +91,7 @@ async def run_simple(
             await enqueue_url(URLItem(url=normalize_url(url), session_id=session_id, depth=0))
     else:
         logger.info("Resuming session %s", session_id)
+    set_current_run(session_id)
 
     stats = SessionStats()
     visited_urls: list[str] = []

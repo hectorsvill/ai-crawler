@@ -270,7 +270,8 @@ async def run_langgraph(
             max_pages=max_pages, max_depth=max_depth, model=model,
         )
 
-    from llm.client import OllamaClient
+    from llm.client import make_llm_client
+    from llm.usage import set_current_run
     from agents.navigator import NavigatorAgent
     from agents.extractor import ExtractorAgent
     from storage.db import create_crawl_session, finish_crawl_session, get_all_extractions
@@ -279,7 +280,7 @@ async def run_langgraph(
     effective_max_pages = max_pages or config.crawl.max_pages
     effective_max_depth = max_depth or config.crawl.max_depth
 
-    llm = OllamaClient(config.ollama)
+    llm = make_llm_client(config, model=model)
     navigator = NavigatorAgent(llm)
     extractor = ExtractorAgent(llm)
 
@@ -287,6 +288,7 @@ async def run_langgraph(
         session_id = await create_crawl_session(
             goal=goal, workflow_used="langgraph", start_urls=start_urls
         )
+    set_current_run(session_id)
 
     # Seed URLs into DB queue
     from storage.db import enqueue_url

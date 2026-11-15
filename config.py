@@ -59,6 +59,30 @@ class CrawlConfig(BaseModel):
     conditional_requests: bool = True  # send ETag/If-Modified-Since
 
 
+class LLMConfig(BaseModel):
+    """Provider selection for the LLM crawler.
+
+    provider: ollama | gemini | anthropic | openai | deepseek
+    model:    default model for every role on API providers (navigator/extractor/router);
+              per-role overrides below. For ``ollama`` the ``ollama:`` section is used.
+    prices:   optional {model: {input: USD per 1M tokens, output: USD per 1M tokens}}
+              used to estimate cost in the llm_usage table (null cost when absent).
+    API keys are read from env vars only (GEMINI_API_KEY/GOOGLE_API_KEY,
+    ANTHROPIC_API_KEY, OPENAI_API_KEY, DEEPSEEK_API_KEY) or ~/.config/ai-crawler/env.
+    """
+
+    provider: str = "ollama"
+    model: str | None = None
+    navigator_model: str | None = None
+    extractor_model: str | None = None
+    router_model: str | None = None
+    base_url: str | None = None
+    timeout: int = 120
+    max_retries: int = 3
+    prices: dict[str, dict[str, float]] = Field(default_factory=dict)
+    usage_db_path: str | None = None  # default: storage.db_path
+
+
 class StorageConfig(BaseModel):
     db_path: str = "crawl_data.db"
 
@@ -73,6 +97,7 @@ class AppConfig(BaseModel):
     """Complete application configuration assembled from YAML + overrides."""
 
     ollama: OllamaConfig = Field(default_factory=OllamaConfig)
+    llm: LLMConfig = Field(default_factory=LLMConfig)
     crawl: CrawlConfig = Field(default_factory=CrawlConfig)
     storage: StorageConfig = Field(default_factory=StorageConfig)
     workflow: WorkflowConfig = Field(default_factory=WorkflowConfig)
