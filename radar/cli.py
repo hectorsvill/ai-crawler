@@ -55,6 +55,10 @@ def crawl_cmd(
     concurrency: int = typer.Option(2, "--concurrency", min=1, max=8, help="Global concurrent fetches."),
     delay: float = typer.Option(2.0, "--delay", min=0.5, help="Min seconds between requests per domain."),
     recent_days: int = typer.Option(7, "--recent-days", help="Skip feed items older than N days (0 = keep all)."),
+    keep_url_log_days: int = typer.Option(
+        0, "--keep-url-log-days", min=0,
+        help="At crawl start, delete run_urls of runs older than N days. 0 (default) keeps them forever.",
+    ),
     user_agent: Optional[str] = typer.Option(None, "--user-agent", envvar="CRAWLER_RADAR_UA", help="Override UA."),
     db: Optional[str] = DBOpt,
     dry_run: bool = typer.Option(False, "--dry-run", help="Print the plan; no network, no DB writes."),
@@ -85,7 +89,7 @@ def crawl_cmd(
     params = CrawlParams(
         max_pages=max_pages, max_depth=max_depth, concurrency=concurrency, delay=delay,
         recent_days=recent_days or None, user_agent=user_agent or DEFAULT_UA,
-        topics=list(topic) or None,
+        topics=list(topic) or None, keep_url_log_days=keep_url_log_days,
     )
     db_path = db or DEFAULT_DB_PATH
     if dry_run:
@@ -93,6 +97,8 @@ def crawl_cmd(
         emit(p, as_json, human=(
             f"DRY RUN: {len(p['seeds'])} seeds across {len(p['domains'])} domains, "
             f"<= {p['max_possible_fetches']} fetches, db={db_path}\n"
+            f"url log: {p['url_log']['table']} "
+            f"(one row per URL encountered; no writes on dry-run)\n"
             + "\n".join(f"  [{s['kind']}] {s['url']}  topics={s['topics']}" for s in p["seeds"])))
         raise typer.Exit(rc.OK)
 
@@ -104,6 +110,7 @@ def crawl_cmd(
         f"run {result['run_id']} {result['status']}: fetched={c['fetched']} stored={c['stored']} "
         f"(new={c['inserted']} updated={c['updated']} unchanged={c['unchanged']}) "
         f"failed={c['failed']} skipped={c['skipped']} domains={len(result['domains'])} "
+        f"urls_logged={result['urls_logged']} urls_counted={result['urls_counted']} "
         f"in {result['elapsed_s']}s → {result['db_path']}"))
     if result["status"] == "failed":
         raise typer.Exit(rc.ERROR)
@@ -135,6 +142,88 @@ def pages_cmd(
     emit(rows, as_json, human="\n".join(
         f"{r['id']:>5}  {(r['published_at'] or '-')[:10]}  {r['domain']:<22.22}  "
         f"{(r['title'] or r['url'])[:80]}  [{','.join(r['tags'])}]" for r in rows) or "(no pages)")
+
+
+@radar_app.command("urls")
+def urls_cmd(
+    run_id: Optional[int] = typer.Option(None, "--run", help="Only URLs from this run id."),
+    status: Optional[str] = typer.Option(
+        None, "--status", "-s",
+        help="stored | feed_only | failed | skipped | not_fetched | duplicate | fetched.",
+    ),
+    domain: Optional[str] = typer.Option(None, "--domain", "-d"),
+    limit: int = typer.Option(100, "--limit", "-n", min=1),
+    offset: int = typer.Option(0, "--offset", min=0),
+    counts: bool = typer.Option(
+        False, "--counts",
+        help="With --run: per-status/reason counts reconciled with the run's counters.",
+    ),
+    prune: bool = typer.Option(
+        False, "--prune",
+        help="Delete run_urls rows older than --keep-url-log-days (runs and counts kept).",
+    ),
+    keep_url_log_days: Optional[int] = typer.Option(
+        None, "--keep-url-log-days",
+        help="With --prune: required, N > 0. Delete run_urls for runs started more than N days ago.",
+    ),
+    dry_run: bool = typer.Option(
+        False, "--dry-run", help="With --prune: report what would be deleted, do not write.",
+    ),
+    db: Optional[str] = DBOpt,
+    as_json: bool = JsonOpt,
+) -> None:
+    """List every URL a run logged (not only stored pages), or prune old log rows."""
+    from radar.db import URL_STATUSES
+
+    if status is not None and status not in URL_STATUSES:
+        fail(
+            f"unknown status {status!r}. Expected: {', '.join(URL_STATUSES)}",
+            rc.USAGE, as_json,
+        )
+    if dry_run and not prune:
+        fail("--dry-run is only valid with --prune", rc.USAGE, as_json)
+    if prune and (counts or status is not None or run_id is not None or domain):
+        fail("--prune cannot be combined with --run, --status, --domain, or --counts",
+             rc.USAGE, as_json)
+    if prune and (keep_url_log_days is None or keep_url_log_days <= 0):
+        fail("--prune needs --keep-url-log-days N with N > 0", rc.USAGE, as_json)
+    with _db(db) as store:
+        if prune:
+            assert keep_url_log_days is not None
+            summary = store.prune_url_log(keep_url_log_days, dry_run=dry_run)
+            verb = "would delete" if dry_run else "deleted"
+            if summary.get("disabled"):
+                human = f"pruning disabled (--keep-url-log-days {keep_url_log_days})"
+            else:
+                human = (
+                    f"{verb} {summary['rows']} run_urls rows from "
+                    f"{len(summary['runs'])} runs (cutoff {summary['cutoff']})"
+                )
+            emit(summary, as_json, human=human)
+            return
+        if run_id is not None and store.get_run(run_id) is None:
+            fail(f"run {run_id} not found", rc.NOT_FOUND, as_json)
+        if counts:
+            if run_id is None:
+                fail("--counts needs --run N", rc.USAGE, as_json)
+            summary = store.url_counts(run_id)
+            extra = (f"  (+{summary['aggregated']} legacy counts)"
+                     if summary["aggregated"] else "")
+            emit(summary, as_json, human=(
+                f"run {run_id}: {summary['total']} urls ({summary['rows']} rows){extra}  "
+                + "  ".join(f"{k}={v}" for k, v in summary["by_status"].items() if v) + "\n"
+                + "\n".join(f"  {k:<14} run={r['run']} url_log={r['url_log']}"
+                             f"{'' if r['match'] else '  MISMATCH'}"
+                             for k, r in summary["reconciliation"].items())))
+            return
+        try:
+            rows = store.query_urls(run_id, status, domain, limit, offset)
+        except ValueError as exc:
+            fail(str(exc), rc.USAGE, as_json)
+    emit(rows, as_json, human="\n".join(
+        f"{r['run_id']:>4}  {r['status']:<12} d={r['depth']}  {r['domain']:<24.24}  {r['url']}"
+        + (f"  ({r['reason']})" if r["reason"] else "")
+        for r in rows) or "(no urls)")
 
 
 @radar_app.command("show")
@@ -213,7 +302,7 @@ def stats_cmd(db: Optional[str] = DBOpt, as_json: bool = JsonOpt) -> None:
         s = store.stats()
     emit(s, as_json, human=(
         f"db={s['db_path']} pages={s['pages']} (dated {s['pages_with_published_at']}) "
-        f"domains={s['domains']} runs={s['runs']}\n"
+        f"domains={s['domains']} runs={s['runs']} url_log={s['url_log']}\n"
         + "\n".join(f"  {t['tag']:<24} {t['pages']}" for t in s["tags"])))
 
 

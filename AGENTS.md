@@ -39,7 +39,8 @@ the provider's API key set). `providers` lists which keys are configured (names 
   `CRAWLER_<SECTION>__<KEY>` for the LLM crawler (e.g. `CRAWLER_OLLAMA__BASE_URL`,
   `CRAWLER_STORAGE__DB_PATH`).
 - **Politeness** (radar): honest UA `ai-crawler-radar/1.0 (+https://github.com/hectorsvill/ai-crawler)`,
-  robots.txt checked for that UA (RFC 9309: 4xx = allowed, 5xx/unreachable = disallowed),
+  robots.txt checked for that UA (RFC 9309: 4xx = allowed, 5xx/unreachable = disallowed;
+  groups split only on `User-agent` lines, so rules after a blank line still apply),
   `Crawl-delay` honoured (above 30 s: only one request to that domain per run; seeds may set
 `feed_only: true` to store feed entries without fetching articles), >= 2 s between requests per domain (+ jitter), concurrency 2,
   3 MB response cap, hard `--max-pages` budget.
@@ -71,6 +72,16 @@ Own SQLite DB at `data/crawler.db` (gitignored). Seeds: `radar/seeds.yaml`.
 .venv/bin/python main.py radar stats --json
 .venv/bin/python main.py radar topics --json
 
+# Every URL the run encountered (one row each; kept forever unless you prune)
+.venv/bin/python main.py radar urls --run 3 --json
+.venv/bin/python main.py radar urls --run 3 --status skipped --json
+.venv/bin/python main.py radar urls --status not_fetched --domain bbc.com --limit 100 --json
+# Per-status / per-reason counts reconciled with the run counters. Counts match the rows.
+.venv/bin/python main.py radar urls --run 3 --counts --json
+# Opt-in prune. N is required and must be > 0. --dry-run deletes nothing.
+.venv/bin/python main.py radar urls --prune --keep-url-log-days 30 --dry-run --json
+.venv/bin/python main.py radar urls --prune --keep-url-log-days 30 --json
+
 # Export (stdout by default; -o writes a file and prints a JSON receipt on stderr)
 .venv/bin/python main.py radar export --format jsonl --since 2026-11-12 > pages.jsonl
 .venv/bin/python main.py radar export --format json --topic ai-security -o exports/ai-security.json
@@ -79,7 +90,63 @@ Own SQLite DB at `data/crawler.db` (gitignored). Seeds: `radar/seeds.yaml`.
 
 `radar crawl --json` result: `{run_id, status: completed|partial|failed, db_path, elapsed_s,
 counters: {fetched, stored, failed, skipped, feed_only, inserted, updated, unchanged, duplicate_content},
-domains, errors: [{url, error}], skips: [{url, reason}]}`.
+domains, errors: [{url, error}], skips: [{url, reason}], urls_logged, urls_counted, url_log_pruned}`.
+`urls_logged` is the number of `run_urls` rows for that run (every encountered URL).
+`urls_counted` is 0: nothing is stored only as a count. `url_log_pruned` is
+`{keep_days, cutoff, rows, disabled}` from the pre-run prune. `--keep-url-log-days` defaults
+to 0, so a crawl deletes nothing. A positive value deletes `run_urls` rows of runs started
+more than that many days ago. `runs` and `run_url_counts` are never pruned.
+
+`radar crawl --dry-run --json` includes `url_log` (`table`, `counts_table`, `key`, `statuses`,
+`not_fetched_reasons`, `keep_url_log_days`, `seed_urls`) and does not open the DB. A live run
+writes one `run_urls` row per URL. `run_url_counts` is then rewritten from those rows.
+
+`radar urls --json` prints a JSON array (oldest discovery first). Filters: `--run`, `--status`,
+`--domain` (exact or subdomain), `--limit` (default 100), `--offset`. Unknown `--status` exits
+**2**. `--run` that is not in `runs` exits **4**. No matches exits **0** with `[]`.
+
+URL object: `{id, run_id, url, domain, source_seed, discovered_from, depth, status, reason,
+http_status, discovered_at, fetched_at}`. `discovered_from` is null for the seed itself.
+`fetched_at` is set only when a request was sent (including HTTP errors and transport
+failures). Page URLs are normalized the same way as `pages.url`.
+
+`status`:
+
+| status | meaning |
+|--------|---------|
+| `stored` | `pages` row written with a body |
+| `feed_only` | `pages` row written from feed metadata, no body |
+| `failed` | request failed and no `pages` row was written |
+| `skipped` | robots.txt disallow, long Crawl-delay with nothing to store, or non-HTML content-type |
+| `not_fetched` | seen and never requested |
+| `duplicate` | `pages` row written but text omitted (`duplicate_content`: same hash, other URL) |
+| `fetched` | seed feed document retrieved and parsed, not stored as a page |
+
+Every `not_fetched` reason is its own row: `budget` (page cap), `depth`, `max_items`
+(per-seed cap), `link_cap` (per-page follow cap), `require_match`, `recent_days`, `no_title`
+(feed_only seed, empty title). A fetch failure or long Crawl-delay that still saves feed
+metadata is `feed_only`; `reason` / `http_status` keep the error (`HTTP 403`,
+`crawl-delay 100s`) and `runs.errors` still lists fetch failures. Nav, off-site, and asset
+links rejected by `is_article_link` are not logged. robots.txt itself is not logged.
+The same URL is handled once per run (a repeated seed, or a seed that is also a discovered
+link, is not fetched again), so the row, `run_url_counts`, and the run counters agree.
+
+`radar urls --run N --counts --json` → `{run_id, total, rows, aggregated, by_status{...},
+by_reason[{status, reason, count}], reconciliation{pages_fetched|pages_stored|pages_failed|
+pages_skipped: {run, url_log, match}}, ok}`. For a crawl, `run_url_counts` matches the rows:
+`aggregated` is 0 and `total` equals `rows`. `aggregated` is only the surplus of older
+count-only totals that have no row (not added again when the count already equals the rows).
+(`--counts` without `--run` exits 2). Mapping: `pages_fetched` = rows with `http_status`;
+`pages_stored` = stored + duplicate + feed_only; `pages_failed` = failed + feed_only with
+reason `HTTP ...`; `pages_skipped` = skipped + feed_only with reason `crawl-delay ...`.
+
+`radar urls --prune` requires `--keep-url-log-days N` with N > 0 (exit 2 otherwise, including
+N omitted or 0). `--dry-run` reports `{keep_days, cutoff, runs, rows, dry_run, disabled}` and
+deletes nothing. Without `--dry-run` the same command deletes those `run_urls` rows. `--prune`
+cannot be combined with `--run`, `--status`, `--domain`, or `--counts` (exit 2). `--dry-run`
+without `--prune` exits 2. A live crawl prunes only when its own `--keep-url-log-days` is
+positive; the default 0 leaves every row in place. The log grows with every crawl until you
+opt in. `runs` and `run_url_counts` are never pruned.
 
 Page objects: `{id, url, canonical_url, domain, title, description, published_at, fetched_at,
 http_status, content_hash, source_seed, first_run_id, last_run_id, times_seen, tags[, text_md]}`.
@@ -99,9 +166,20 @@ runs(id, started_at, ended_at, status, params JSON, pages_fetched, pages_stored,
      pages_failed, pages_skipped, errors JSON)
 pages(id, url UNIQUE, canonical_url, domain, title, description, published_at, fetched_at,
       http_status, content_hash, text_md, source_seed, first_run_id, last_run_id, times_seen)
+run_urls(id, run_id, url, domain, source_seed, discovered_from, depth, status, reason,
+         http_status, discovered_at, fetched_at)  -- UNIQUE(run_id, url)
+run_url_counts(run_id, status, reason, n)  -- PK(run_id, status, reason)
 tags(id, name UNIQUE)          page_tags(page_id, tag_id)  -- PK(page_id, tag_id)
 pages_fts  -- FTS5 over (title, text_md), kept in sync by triggers
 ```
+
+`pages` and `pages_fts` are unchanged. Opening an older `data/crawler.db` applies an
+idempotent migration: `run_urls` at `PRAGMA user_version` 2 (new table and any missing
+columns only), `run_url_counts` at version 3. No rewrite of existing page rows, historical
+`run_urls` rows, or historical count-only totals. Re-opening is a no-op. The same URL in a
+later run is a new row (the key is per run). Rows stay until an explicit positive
+`--keep-url-log-days` prune. Copy `data/crawler.db` before the first open of a file that
+has not yet been migrated.
 
 Direct SQL is fine for reads: `sqlite3 data/crawler.db 'SELECT title, url FROM pages ORDER BY published_at DESC LIMIT 10'`.
 

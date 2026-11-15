@@ -326,6 +326,76 @@ export CRAWLER_STORAGE__DB_PATH="/data/crawl.db"
 
 ---
 
+## Radar crawler (no LLM)
+
+`main.py radar` stores pages in `data/crawler.db` (gitignored) and writes **every URL a run encounters** to `run_urls`, one row per URL: seeds, fetches, skips, failures, duplicates, and every candidate that was not fetched. `run_url_counts` is rewritten from those rows, so the counts match the log. Rows are kept forever unless you opt into pruning. `pages` and its FTS5 index stay as they are. The table grows with every crawl.
+
+`radar crawl --dry-run` prints the plan, including `url_log`, and does not open the database. A live `radar crawl --json` result adds `urls_logged` (row count), `urls_counted` (always 0), and `url_log_pruned`. `--keep-url-log-days` defaults to 0, so a crawl does not delete anything. A positive value deletes `run_urls` rows of runs started more than that many days ago. Run counters and `run_url_counts` are never deleted.
+
+robots.txt is still checked for the real User-Agent (RFC 9309: 4xx means allowed, 5xx or unreachable means disallowed). Record groups split only on `User-agent` lines. Blank lines and comment-only lines are removed before parsing, so a `Crawl-delay` or `Disallow` that follows a blank line in the same group still applies. A `Crawl-delay` above 30 seconds still means one request to that domain per run.
+
+### `radar urls`
+
+```bash
+python main.py radar urls --run 3 --json
+python main.py radar urls --run 3 --status skipped --json
+python main.py radar urls --status not_fetched --domain example.com --json
+python main.py radar urls --run 3 --counts --json
+python main.py radar urls --prune --keep-url-log-days 30 --dry-run --json
+python main.py radar urls --prune --keep-url-log-days 30 --json
+```
+
+Without `--counts` or `--prune`, `--json` is one array, oldest discovery first. Filters: `--run`, `--status`, `--domain` (exact host or a subdomain), `--limit` (default 100), `--offset`.
+
+| Exit | When |
+|------|------|
+| 0 | success, including no rows (`[]`) |
+| 2 | unknown `--status`; `--counts` without `--run`; `--prune` without `--keep-url-log-days N` where N > 0; `--prune` combined with `--run`, `--status`, `--domain`, or `--counts`; `--dry-run` without `--prune` |
+| 4 | `--run` is not in `runs` |
+
+Each row is `{id, run_id, url, domain, source_seed, discovered_from, depth, status, reason, http_status, discovered_at, fetched_at}`. `discovered_from` is null for the seed. `fetched_at` is set only when a request was sent (including HTTP errors and transport failures). Page URLs are normalized the same way as `pages.url`. The same URL in a later run is a new row (`UNIQUE(run_id, url)`).
+
+`--counts` needs `--run`. `--json` is one object: `{run_id, total, rows, aggregated, by_status, by_reason[{status, reason, count}], reconciliation, ok}`. For a crawl, `aggregated` is 0 and `total` equals `rows`, because `run_url_counts` is a mirror of the rows. `aggregated` is only a surplus left by older count-only totals. `reconciliation` compares the run row with the log. Each counter is `{run, url_log, match}`:
+
+| Run counter | Counted in the URL log as |
+|-------------|---------------------------|
+| `pages_fetched` | rows with `http_status` set |
+| `pages_stored` | `stored` + `duplicate` + `feed_only` |
+| `pages_failed` | `failed`, plus `feed_only` whose reason is `HTTP ...` |
+| `pages_skipped` | `skipped`, plus `feed_only` whose reason is `crawl-delay ...` |
+
+`ok` is true when every `match` is true. The same URL is handled once per run, so a repeated seed does not fetch or count a second time.
+
+`--prune` does nothing unless you pass `--keep-url-log-days N` with N > 0. `--dry-run` prints what would be deleted and does not write. Without `--dry-run` it deletes those `run_urls` rows only.
+
+### Statuses and reasons
+
+| status | meaning |
+|--------|---------|
+| `stored` | `pages` row written with a body |
+| `feed_only` | `pages` row written from feed metadata, no body |
+| `failed` | request failed and no `pages` row was written |
+| `skipped` | robots.txt disallow, long Crawl-delay with nothing to store, or non-HTML content-type |
+| `not_fetched` | seen and never requested |
+| `duplicate` | `pages` row written, text omitted (same content hash under another URL) |
+| `fetched` | seed feed document retrieved and parsed, not stored as a page |
+
+Every `not_fetched` reason is a row: `budget` (page cap), `depth`, `max_items` (per-seed cap), `link_cap` (per-page follow cap), `require_match`, `recent_days`, `no_title` (a `feed_only` seed whose entry has no title).
+
+A fetch failure or long Crawl-delay that still saves feed metadata stays `feed_only`. `reason` and `http_status` keep the cause (`HTTP 403`, `crawl-delay 100s`), and `runs.errors` still lists fetch failures. Links rejected by `is_article_link` (nav, other sites, assets) are not logged. The robots.txt URL itself is not logged.
+
+### Schema
+
+`run_urls(id, run_id, url, domain, source_seed, discovered_from, depth, status, reason, http_status, discovered_at, fetched_at)` with `UNIQUE(run_id, url)`; `run_url_counts(run_id, status, reason, n)`.
+
+The first time an older `data/crawler.db` is opened, the migration adds `run_urls` and any missing columns (schema version 2, `PRAGMA user_version`) and `run_url_counts` (version 3). Existing page rows, URL rows, and count totals are kept. Opening the file again is a no-op. Copy the database before that first open:
+
+```bash
+cp data/crawler.db data/crawler.db.bak
+```
+
+The command contract is in [`AGENTS.md`](AGENTS.md).
+
 ## 11. Running the Test Suite
 
 Tests require no Ollama instance or network connection — they cover all pure-Python logic.
@@ -359,6 +429,7 @@ Test coverage includes:
 
 | Area | Change |
 |------|--------|
+| **Radar URL log** | Every URL a radar run encounters is one `run_urls` row (every not-fetched reason included) and `run_url_counts` mirrors those rows. Rows are kept forever unless `--keep-url-log-days N` (N > 0) is passed to crawl or `radar urls --prune`. Schema v2/v3 adds the tables on open without deleting existing rows. robots.txt blank lines no longer drop a later `Crawl-delay` or `Disallow` in the same group. |
 | **URL normalization** | All URLs are canonicalized before queuing (lowercase, strip fragments/default ports/trailing slashes, sort query params) preventing duplicate crawls of semantically identical URLs |
 | **Score clamping** | LLM-returned scores outside [0, 1] are clamped rather than rejected, preventing crawl interruption from out-of-range model output |
 | **Action validation** | `NavigatorDecision.action` values not in `{deepen, backtrack, complete}` safely default to `deepen` |

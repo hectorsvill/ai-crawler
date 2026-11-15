@@ -19,7 +19,7 @@ def _json(result):
 def test_radar_help_lists_commands():
     r = runner.invoke(app, ["radar", "--help"])
     assert r.exit_code == 0
-    for cmd in ("crawl", "pages", "show", "export", "runs", "stats", "topics"):
+    for cmd in ("crawl", "pages", "urls", "show", "export", "runs", "stats", "topics"):
         assert cmd in r.stdout
 
 
@@ -31,6 +31,9 @@ def test_radar_crawl_dry_run_json(tmp_path):
     plan = _json(r)
     assert plan["dry_run"] is True and plan["limits"]["max_pages"] == 50
     assert plan["seeds"] and not db.exists()  # dry run never creates the DB
+    assert plan["url_log"]["table"] == "run_urls"
+    assert plan["url_log"]["seed_urls"]
+    assert plan["limits"]["keep_url_log_days"] == 0
 
 
 def test_radar_crawl_missing_seeds_file(tmp_path):
@@ -48,7 +51,7 @@ def test_radar_crawl_bad_kind():
 
 def test_radar_query_commands_on_empty_db(tmp_path):
     db = str(tmp_path / "r.db")
-    for args in (["pages"], ["runs"], ["stats"], ["topics"]):
+    for args in (["pages"], ["runs"], ["stats"], ["topics"], ["urls"]):
         r = runner.invoke(app, ["radar", *args, "--json"] + (["--db", db] if args != ["topics"] else []))
         assert r.exit_code == 0, (args, r.output)
         _json(r)  # valid JSON
@@ -72,6 +75,50 @@ def test_radar_pages_and_export_with_data(tmp_path):
     assert r.exit_code == 0 and json.loads(out.read_text())[0]["text_md"] == "anthropic red team"
     r = runner.invoke(app, ["radar", "pages", "--db", db, "--q", "\"unclosed", "--json"])
     assert r.exit_code == rc.USAGE
+
+
+def test_radar_urls_json_filters_and_exit_codes(tmp_path):
+    from radar.db import RadarDB
+    db = str(tmp_path / "r.db")
+    with RadarDB(db) as store:
+        run = store.start_run({"seeds": ["https://a.com/rss"]})
+        store.log_url({
+            "run_id": run, "url": "https://a.com/ok", "domain": "a.com", "depth": 0,
+            "source_seed": "https://a.com/rss", "status": "stored",
+            "http_status": 200, "fetched_at": "2026-11-15T00:00:01+00:00",
+        })
+        store.log_url({
+            "run_id": run, "url": "https://news.a.com/hidden", "domain": "news.a.com",
+            "depth": 1, "source_seed": "https://a.com/rss", "discovered_from": "https://a.com/rss",
+            "status": "skipped", "reason": "robots.txt",
+        })
+        other = store.start_run({})
+        store.log_url({
+            "run_id": other, "url": "https://b.com/nope", "domain": "b.com",
+            "status": "failed", "reason": "HTTP 500", "http_status": 500,
+        })
+
+    r = runner.invoke(app, ["radar", "urls", "--db", db, "--json", "--run", str(run),
+                            "--status", "skipped"])
+    assert r.exit_code == rc.OK, r.output
+    rows = _json(r)
+    assert len(rows) == 1
+    assert rows[0]["url"] == "https://news.a.com/hidden"
+    assert rows[0]["status"] == "skipped" and rows[0]["reason"] == "robots.txt"
+    assert rows[0]["fetched_at"] is None and rows[0]["depth"] == 1
+
+    r = runner.invoke(app, ["radar", "urls", "--db", db, "--json", "--domain", "a.com",
+                            "--status", "stored"])
+    assert r.exit_code == 0
+    assert [row["url"] for row in _json(r)] == ["https://a.com/ok"]
+
+    r = runner.invoke(app, ["radar", "urls", "--db", db, "--json", "--status", "nope"])
+    assert r.exit_code == rc.USAGE
+    assert _json(r)["exit_code"] == rc.USAGE
+
+    r = runner.invoke(app, ["radar", "urls", "--db", db, "--json", "--run", "999"])
+    assert r.exit_code == rc.NOT_FOUND
+    assert _json(r)["exit_code"] == rc.NOT_FOUND
 
 
 def test_crawl_requires_start_url_exit_usage():
@@ -107,3 +154,79 @@ def test_doctor_json():
     assert r.exit_code in (rc.OK, rc.DEPENDENCY)
     rep = _json(r)
     assert {"core_deps", "ollama", "radar_ready", "llm_crawl_ready"} <= rep.keys()
+
+
+def test_radar_urls_counts_json_and_exit_codes(tmp_path):
+    from typer.testing import CliRunner
+    from main import app
+    from radar.db import RadarDB
+    db = str(tmp_path / "r.db")
+    store = RadarDB(db)
+    run = store.start_run({})
+    store.log_url({"run_id": run, "url": "https://a.com/x", "domain": "a.com",
+                   "status": "stored", "http_status": 200})
+    store.log_url({"run_id": run, "url": "https://a.com/y", "domain": "a.com",
+                   "status": "not_fetched", "reason": "budget"})
+    store.finish_run(run, "completed", {"fetched": 1, "stored": 1, "failed": 0, "skipped": 0}, [])
+    store.close()
+    runner = CliRunner()
+    r = runner.invoke(app, ["radar", "urls", "--db", db, "--json", "--run", str(run), "--counts"])
+    assert r.exit_code == 0, r.output
+    d = json.loads(r.stdout)
+    assert d["ok"] and d["total"] == 2
+    assert d["by_status"]["stored"] == 1 and d["by_status"]["not_fetched"] == 1
+    r = runner.invoke(app, ["radar", "urls", "--db", db, "--json", "--counts"])
+    assert r.exit_code == 2 and json.loads(r.stdout)["exit_code"] == 2
+    r = runner.invoke(app, ["radar", "urls", "--db", db, "--json", "--counts", "--run", "999"])
+    assert r.exit_code == 4
+
+
+
+def test_radar_urls_prune_dry_run_and_exit_codes(tmp_path):
+    from datetime import datetime, timedelta, timezone
+    from typer.testing import CliRunner
+    from main import app
+    from radar.db import RadarDB
+    db = str(tmp_path / "r.db")
+    store = RadarDB(db)
+    run = store.start_run({})
+    started = (datetime.now(timezone.utc) - timedelta(days=40)).replace(
+        microsecond=0).isoformat()
+    store.conn.execute("UPDATE runs SET started_at = ? WHERE id = ?", (started, run))
+    store.conn.commit()
+    store.log_url({"run_id": run, "url": "https://a.com/x", "domain": "a.com",
+                   "status": "stored", "http_status": 200})
+    store.add_url_counts(run, {("not_fetched", "recent_days"): 7})
+    store.finish_run(run, "completed", {"fetched": 1, "stored": 1}, [])
+    store.close()
+    runner = CliRunner()
+    r = runner.invoke(app, ["radar", "urls", "--db", db, "--json", "--prune", "--dry-run"])
+    assert r.exit_code == rc.USAGE
+    assert json.loads(r.stdout)["exit_code"] == rc.USAGE
+    r = runner.invoke(app, ["radar", "urls", "--db", db, "--json", "--prune",
+                            "--keep-url-log-days", "0"])
+    assert r.exit_code == rc.USAGE
+    store = RadarDB(db)
+    assert store.count_urls(run) == 1
+    store.close()
+    r = runner.invoke(app, ["radar", "urls", "--db", db, "--json", "--prune", "--dry-run",
+                            "--keep-url-log-days", "30"])
+    assert r.exit_code == 0, r.output
+    d = json.loads(r.stdout)
+    assert d["dry_run"] and d["rows"] == 1 and run in d["runs"]
+    store = RadarDB(db)
+    assert store.count_urls(run) == 1
+    store.close()
+    r = runner.invoke(app, ["radar", "urls", "--db", db, "--json", "--prune",
+                            "--keep-url-log-days", "30"])
+    assert r.exit_code == 0, r.output
+    d = json.loads(r.stdout)
+    assert not d["dry_run"] and d["rows"] == 1
+    store = RadarDB(db)
+    assert store.count_urls(run) == 0
+    assert store.url_counts(run)["aggregated"] == 7
+    store.close()
+    r = runner.invoke(app, ["radar", "urls", "--db", db, "--json", "--dry-run"])
+    assert r.exit_code == 2
+    r = runner.invoke(app, ["radar", "urls", "--db", db, "--json", "--prune", "--counts", "--run", "1"])
+    assert r.exit_code == 2
