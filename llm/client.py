@@ -200,7 +200,7 @@ class ChatClient:
 
     Usage:
         client = make_llm_client(config)               # provider from config/env
-        client = make_llm_client(config, provider="gemini", model="gemini-2.5-flash")
+        client = make_llm_client(config, provider="gemini", model="gemini-3.5-flash-lite")
         result = await client.structured_call(
             model=client.extractor_model,
             system_prompt=EXTRACT_SYSTEM,
@@ -384,9 +384,9 @@ def resolve_models(config: Any, provider: str, model: str | None = None) -> dict
     """Role -> model for *provider*.
 
     ollama: llm.<role> > ollama.<role> (keeps existing config working).
-    others: llm.<role> > --model / llm.model > provider default.
+    others: llm.<role> > --model / llm.model > per-role default > provider default.
     """
-    from llm.providers import DEFAULT_MODELS
+    from llm.providers import default_model
 
     llm_cfg = getattr(config, "llm", None)
     roles = ("navigator_model", "extractor_model", "router_model")
@@ -398,7 +398,7 @@ def resolve_models(config: Any, provider: str, model: str | None = None) -> dict
                 or getattr(config.ollama, role)
         else:
             out[role] = explicit or model or (llm_cfg.model if llm_cfg and llm_cfg.model else None) \
-                or DEFAULT_MODELS[provider]
+                or default_model(provider, role)
     return out
 
 

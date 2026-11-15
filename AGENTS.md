@@ -109,7 +109,7 @@ Direct SQL is fine for reads: `sqlite3 data/crawler.db 'SELECT title, url FROM p
 Providers: `ollama` (default, local) · `gemini` · `anthropic` · `openai` · `deepseek`.
 Pick with `--provider/-P` (or `CRAWLER_LLM__PROVIDER`, or `llm.provider` in YAML) and
 `--model/-m` (or `CRAWLER_LLM__MODEL`). Defaults when no model is given:
-`gemini-2.5-flash`, `claude-haiku-4-5`, `gpt-4.1-mini`, `deepseek-chat`; Ollama keeps the
+`gemini-3.5-flash-lite` (extractor role: `gemini-3.5-flash`), `claude-haiku-4-5`, `gpt-4.1-mini`, `deepseek-chat`; Ollama keeps the
 `ollama:` section models (`--model` then overrides only the extractor).
 
 **API keys: env vars only** — never in YAML, flags, or logs:
@@ -132,11 +132,11 @@ vim ~/.config/ai-crawler/env        # add a line:  GEMINI_API_KEY=...
 
 ```bash
 # Verify a provider with ONE tiny call (records tokens under run_id "llm-ping")
-.venv/bin/python main.py llm-ping --provider gemini --model gemini-2.5-flash-lite --dry-run --json
-.venv/bin/python main.py llm-ping --provider gemini --model gemini-2.5-flash-lite --json
+.venv/bin/python main.py llm-ping --provider gemini --model gemini-3.5-flash-lite --dry-run --json
+.venv/bin/python main.py llm-ping --provider gemini --model gemini-3.5-flash-lite --json
 
 # Crawl with a provider
-.venv/bin/python main.py crawl --goal "..." -u https://example.com -w simple -P gemini -m gemini-2.5-flash --max-pages 5 --dry-run --json
+.venv/bin/python main.py crawl --goal "..." -u https://example.com -w simple -P gemini -m gemini-3.5-flash-lite --max-pages 5 --dry-run --json
 .venv/bin/python main.py crawl --goal "..." -u https://example.com -w simple -P gemini --max-pages 5 --json
 .venv/bin/python main.py research --goal "..." -u "https://arxiv.org/list/cs.CR/new" -P anthropic --dry-run
 .venv/bin/python main.py resume <session-id> -P openai

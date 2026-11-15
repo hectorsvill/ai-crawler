@@ -41,11 +41,28 @@ KEY_ENV: dict[str, tuple[str, ...]] = {
 # Sensible cheap defaults; override with --model / CRAWLER_LLM__MODEL.
 DEFAULT_MODELS: dict[str, str] = {
     "ollama": "qwen2.5:7b",
-    "gemini": "gemini-2.5-flash",
+    "gemini": "gemini-3.5-flash-lite",
     "anthropic": "claude-haiku-4-5",
     "openai": "gpt-4.1-mini",
     "deepseek": "deepseek-chat",
 }
+
+# Per-role overrides of DEFAULT_MODELS (roles: navigator_model, extractor_model,
+# router_model). Extraction benefits from a stronger model; navigation/routing stay cheap.
+# Gemini names verified against ListModels + a live call (2026-11-15).
+DEFAULT_ROLE_MODELS: dict[str, dict[str, str]] = {
+    "gemini": {"extractor_model": "gemini-3.5-flash"},
+}
+
+
+def default_model(provider: str, role: str | None = None) -> str:
+    """Default model for *provider* (optionally for a specific role)."""
+    if role:
+        m = DEFAULT_ROLE_MODELS.get(provider, {}).get(role)
+        if m:
+            return m
+    return DEFAULT_MODELS[provider]
+
 
 DEFAULT_BASE_URLS: dict[str, str] = {
     "ollama": "http://localhost:11434",

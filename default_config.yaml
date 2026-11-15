@@ -10,14 +10,14 @@ llm:
   # ollama | gemini | anthropic | openai | deepseek   (env: CRAWLER_LLM__PROVIDER)
   provider: "ollama"
   # Model for all roles on API providers (env: CRAWLER_LLM__MODEL). Empty = provider default:
-  #   gemini: gemini-2.5-flash  anthropic: claude-haiku-4-5  openai: gpt-4.1-mini  deepseek: deepseek-chat
+  #   gemini: gemini-3.5-flash-lite (extractor: gemini-3.5-flash)  anthropic: claude-haiku-4-5  openai: gpt-4.1-mini  deepseek: deepseek-chat
   model: null
   timeout: 120
   max_retries: 3
   # Optional price table for cost estimates (USD per 1M tokens). Fill from the
   # provider's current pricing page; unknown models record cost = null.
   # prices:
-  #   gemini-2.5-flash: {input: 0.0, output: 0.0}
+  #   gemini-3.5-flash-lite: {input: 0.0, output: 0.0}
   prices: {}
   # API keys: env vars only (GEMINI_API_KEY | GOOGLE_API_KEY, ANTHROPIC_API_KEY,
   # OPENAI_API_KEY, DEEPSEEK_API_KEY) or ~/.config/ai-crawler/env (chmod 600).

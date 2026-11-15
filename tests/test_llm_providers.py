@@ -153,9 +153,9 @@ def test_unknown_provider():
 # ── usage store / cost ───────────────────────────────────────────────────────
 
 def test_estimate_cost():
-    prices = {"gemini-2.5-flash": {"input": 0.30, "output": 2.50}}
-    assert estimate_cost(prices, "gemini-2.5-flash", 1_000_000, 100_000) == 0.55
-    assert estimate_cost(prices, "gemini-2.5-flash-001", 1_000_000, 0) == 0.3  # prefix
+    prices = {"gemini-3.5-flash-lite": {"input": 0.30, "output": 2.50}}
+    assert estimate_cost(prices, "gemini-3.5-flash-lite", 1_000_000, 100_000) == 0.55
+    assert estimate_cost(prices, "gemini-3.5-flash-lite-001", 1_000_000, 0) == 0.3  # prefix
     assert estimate_cost(prices, "other", 10, 10) is None
     assert estimate_cost({}, "x", 1, 1) is None
 
@@ -192,18 +192,19 @@ def _config(tmp_path, provider="gemini", **llm):
 
 async def test_client_records_usage_with_run_and_cost(tmp_path, monkeypatch):
     monkeypatch.setenv("GEMINI_API_KEY", FAKE_KEY)
-    cfg = _config(tmp_path, prices={"gemini-2.5-flash": {"input": 1.0, "output": 2.0}})
+    cfg = _config(tmp_path, prices={"gemini-3.5-flash-lite": {"input": 1.0, "output": 2.0}})
     client = make_llm_client(cfg, session_factory=FakeSession(200, RESPONSES["gemini"]))
-    assert client.provider_name == "gemini" and client.extractor_model == "gemini-2.5-flash"
+    assert client.provider_name == "gemini" and client.navigator_model == "gemini-3.5-flash-lite"
+    assert client.extractor_model == "gemini-3.5-flash"  # heavier per-role default
     set_current_run("sess-1")
-    out = await client.structured_call(client.extractor_model, "sys", "page", _Schema)
+    out = await client.structured_call(client.navigator_model, "sys", "page", _Schema)
     assert out.a == 1
     row = UsageStore(cfg.storage.db_path).rows()[0]
     assert row["run_id"] == "sess-1" and row["provider"] == "gemini"
     assert row["purpose"] == "_Schema" and row["estimated"] == 0
     assert (row["prompt_tokens"], row["completion_tokens"], row["total_tokens"]) == (15, 10, 25)
     assert row["cost_usd"] == round(15 / 1e6 * 1.0 + 10 / 1e6 * 2.0, 6)
-    assert "gemini:gemini-2.5-flash" in token_usage.as_dict()["per_model"]
+    assert "gemini:gemini-3.5-flash-lite" in token_usage.as_dict()["per_model"]
 
 
 async def test_client_estimates_when_provider_omits_usage(tmp_path, monkeypatch):
@@ -249,6 +250,12 @@ def test_resolve_models(tmp_path):
     assert resolve_models(_config(tmp_path), "deepseek")["extractor_model"] == "deepseek-chat"
 
 
+def test_llm_ping_default_model_is_flash_lite(tmp_path, monkeypatch):
+    monkeypatch.setenv("CRAWLER_STORAGE__DB_PATH", str(tmp_path / "c.db"))
+    r = runner.invoke(_app(), ["llm-ping", "-P", "gemini", "--dry-run", "--json"])
+    assert json.loads(r.stdout)["model"] == "gemini-3.5-flash-lite"
+
+
 def test_backcompat_ollama_client_alias():
     from llm.client import OllamaClient
     from config import load_config
@@ -292,14 +299,14 @@ def test_cli_llm_ping_records_tokens(tmp_path, monkeypatch):
     monkeypatch.setenv("CRAWLER_STORAGE__DB_PATH", str(db))
     monkeypatch.setenv("GEMINI_API_KEY", FAKE_KEY)
     monkeypatch.setattr(P.aiohttp, "ClientSession", FakeSession(200, RESPONSES["gemini"]))
-    r = runner.invoke(_app(), ["llm-ping", "--provider", "gemini", "--model", "gemini-2.5-flash-lite", "--json"])
+    r = runner.invoke(_app(), ["llm-ping", "--provider", "gemini", "--model", "gemini-3.1-flash-lite", "--json"])
     assert r.exit_code == 0, r.output
     d = json.loads(r.stdout)
     assert d["usage"] == {"prompt_tokens": 15, "completion_tokens": 10, "total_tokens": 25,
                           "provider_reported": True}
     assert FAKE_KEY not in r.output
     row = UsageStore(db).rows()[0]
-    assert row["run_id"] == "llm-ping" and row["model"] == "gemini-2.5-flash-lite"
+    assert row["run_id"] == "llm-ping" and row["model"] == "gemini-3.1-flash-lite"
 
 
 def test_cli_unknown_provider():
@@ -314,10 +321,11 @@ def test_cli_crawl_dry_run_with_provider(tmp_path, monkeypatch):
     assert r.exit_code == 3  # no key
     plan = json.loads(r.stdout)
     assert plan["provider"] == "gemini" and plan["provider_ready"] is False
-    assert plan["models"]["extractor_model"] == "gemini-2.5-flash"
+    assert plan["models"]["navigator_model"] == "gemini-3.5-flash-lite"
+    assert plan["models"]["extractor_model"] == "gemini-3.5-flash"
     monkeypatch.setenv("GEMINI_API_KEY", FAKE_KEY)
     r = runner.invoke(_app(), ["crawl", "-g", "x", "-u", "https://a.com", "-P", "gemini",
-                               "-m", "gemini-2.5-flash-lite", "--dry-run", "--json"])
+                               "-m", "gemini-3.1-flash-lite", "--dry-run", "--json"])
     assert r.exit_code == 0 and FAKE_KEY not in r.output
 
 

@@ -54,7 +54,7 @@ def estimate_cost(prices: dict[str, Any] | None, model: str, prompt_tokens: int,
     if not prices:
         return None
     p = prices.get(model)
-    if p is None:  # allow prefix match, e.g. "gemini-2.5-flash" for "gemini-2.5-flash-001"
+    if p is None:  # allow prefix match, e.g. "gemini-3.5-flash-lite" for "gemini-3.5-flash-lite-001"
         for k, v in prices.items():
             if model.startswith(k):
                 p = v

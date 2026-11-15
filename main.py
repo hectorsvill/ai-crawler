@@ -914,7 +914,13 @@ def llm_ping(
 
     cfg = _load_config_with_provider(config_path, provider)
     name = cfg.llm.provider
-    target = model or resolve_models(cfg, name)["extractor_model"]
+    from llm.providers import default_model
+    if model:
+        target = model
+    elif name == "ollama":
+        target = resolve_models(cfg, name)["extractor_model"]
+    else:
+        target = cfg.llm.model or default_model(name)
     ready, why = asyncio.run(check_llm_ready(cfg))
     if dry_run:
         out = {"dry_run": True, "provider": name, "model": target, "ready": ready,
