@@ -153,3 +153,28 @@ def test_doctor_json():
     assert r.exit_code in (rc.OK, rc.DEPENDENCY)
     rep = _json(r)
     assert {"core_deps", "ollama", "radar_ready", "llm_crawl_ready"} <= rep.keys()
+
+
+def test_radar_urls_counts_json_and_exit_codes(tmp_path):
+    from typer.testing import CliRunner
+    from main import app
+    from radar.db import RadarDB
+    db = str(tmp_path / "r.db")
+    store = RadarDB(db)
+    run = store.start_run({})
+    store.log_url({"run_id": run, "url": "https://a.com/x", "domain": "a.com",
+                   "status": "stored", "http_status": 200})
+    store.log_url({"run_id": run, "url": "https://a.com/y", "domain": "a.com",
+                   "status": "not_fetched", "reason": "budget"})
+    store.finish_run(run, "completed", {"fetched": 1, "stored": 1, "failed": 0, "skipped": 0}, [])
+    store.close()
+    runner = CliRunner()
+    r = runner.invoke(app, ["radar", "urls", "--db", db, "--json", "--run", str(run), "--counts"])
+    assert r.exit_code == 0, r.output
+    d = json.loads(r.stdout)
+    assert d["ok"] and d["total"] == 2
+    assert d["by_status"]["stored"] == 1 and d["by_status"]["not_fetched"] == 1
+    r = runner.invoke(app, ["radar", "urls", "--db", db, "--json", "--counts"])
+    assert r.exit_code == 2 and json.loads(r.stdout)["exit_code"] == 2
+    r = runner.invoke(app, ["radar", "urls", "--db", db, "--json", "--counts", "--run", "999"])
+    assert r.exit_code == 4

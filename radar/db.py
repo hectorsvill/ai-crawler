@@ -313,6 +313,48 @@ class RadarDB:
             "SELECT COUNT(*) FROM run_urls WHERE run_id = ?", (run_id,)
         ).fetchone()[0])
 
+    def url_counts(self, run_id: int) -> dict[str, Any]:
+        """Per-status / per-reason counts for one run, reconciled with ``runs`` counters.
+
+        Mapping (a URL has one row; its final status wins):
+          pages_fetched = rows with an HTTP response (http_status set)
+          pages_stored  = stored + duplicate + feed_only
+          pages_failed  = failed + feed_only whose reason is "HTTP ..." (403 -> feed metadata)
+          pages_skipped = skipped + feed_only whose reason is "crawl-delay ..."
+        A URL requested twice in one run (e.g. a seed that is also another seed's
+        link) counts twice in ``runs`` but once here; ``ok`` is then false.
+        """
+        c = self.conn
+
+        def q(sql: str) -> int:
+            return int(c.execute(sql, (run_id,)).fetchone()[0])
+
+        by_status = {r[0]: r[1] for r in c.execute(
+            "SELECT status, COUNT(*) FROM run_urls WHERE run_id = ? GROUP BY status", (run_id,))}
+        by_reason = [dict(r) for r in c.execute(
+            "SELECT status, reason, COUNT(*) AS count FROM run_urls WHERE run_id = ? "
+            "GROUP BY status, reason ORDER BY status, count DESC", (run_id,))]
+        derived = {
+            "pages_fetched": q("SELECT COUNT(*) FROM run_urls WHERE run_id = ? "
+                               "AND http_status IS NOT NULL"),
+            "pages_stored": sum(by_status.get(k, 0) for k in ("stored", "duplicate", "feed_only")),
+            "pages_failed": by_status.get("failed", 0) + q(
+                "SELECT COUNT(*) FROM run_urls WHERE run_id = ? AND status = 'feed_only' "
+                "AND reason LIKE 'HTTP %'"),
+            "pages_skipped": by_status.get("skipped", 0) + q(
+                "SELECT COUNT(*) FROM run_urls WHERE run_id = ? AND status = 'feed_only' "
+                "AND reason LIKE 'crawl-delay%'"),
+        }
+        run = c.execute("SELECT pages_fetched, pages_stored, pages_failed, pages_skipped "
+                        "FROM runs WHERE id = ?", (run_id,)).fetchone()
+        counters = dict(run) if run else {}
+        recon = {k: {"run": counters.get(k), "url_log": v, "match": counters.get(k) == v}
+                 for k, v in derived.items()}
+        return {"run_id": run_id, "total": sum(by_status.values()),
+                "by_status": {k: by_status.get(k, 0) for k in URL_STATUSES},
+                "by_reason": by_reason, "reconciliation": recon,
+                "ok": all(r["match"] for r in recon.values())}
+
     # ── pages ───────────────────────────────────────────────────────────────
     def upsert_page(self, page: dict[str, Any], tags: Iterable[str], run_id: int | None) -> tuple[int, str]:
         """Insert or update a page by URL. Returns (page_id, action).

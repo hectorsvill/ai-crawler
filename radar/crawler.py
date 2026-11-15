@@ -84,6 +84,18 @@ def load_seeds(path: str | Path | None = None, topics: list[str] | None = None) 
     return seeds
 
 
+def robots_lines(text: str) -> list[str]:
+    """robots.txt lines for ``RobotFileParser`` with blank/comment-only lines removed.
+
+    RFC 9309 groups rules by ``User-agent`` lines; blank lines are not group
+    separators. ``urllib.robotparser`` ends a group at a blank line, so rules after
+    one (e.g. militarnyi.com's ``Crawl-delay: 100`` under ``User-agent: *``) were
+    silently dropped. Without blank lines the parser starts a new group only at
+    the next ``User-agent`` line that follows rules — the RFC behaviour.
+    """
+    return [ln for ln in text.splitlines() if ln.split("#", 1)[0].strip()]
+
+
 class RobotsPolicy:
     """Per-origin robots.txt cache evaluated for our real User-Agent."""
 
@@ -106,7 +118,7 @@ class RobotsPolicy:
                 if resp.status >= 400:      # RFC 9309: 4xx => no restrictions
                     rp.parse([])
                     return rp
-                rp.parse((await resp.text(errors="replace")).splitlines())
+                rp.parse(robots_lines(await resp.text(errors="replace")))
                 return rp
         except Exception as exc:  # network error => be conservative
             logger.warning("robots.txt unreachable for %s (%s) — treating as disallow", origin, exc)

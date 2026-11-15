@@ -149,6 +149,10 @@ def urls_cmd(
     domain: Optional[str] = typer.Option(None, "--domain", "-d"),
     limit: int = typer.Option(100, "--limit", "-n", min=1),
     offset: int = typer.Option(0, "--offset", min=0),
+    counts: bool = typer.Option(
+        False, "--counts",
+        help="With --run: per-status/reason counts reconciled with the run's counters.",
+    ),
     db: Optional[str] = DBOpt,
     as_json: bool = JsonOpt,
 ) -> None:
@@ -163,6 +167,17 @@ def urls_cmd(
     with _db(db) as store:
         if run_id is not None and store.get_run(run_id) is None:
             fail(f"run {run_id} not found", rc.NOT_FOUND, as_json)
+        if counts:
+            if run_id is None:
+                fail("--counts needs --run N", rc.USAGE, as_json)
+            summary = store.url_counts(run_id)
+            emit(summary, as_json, human=(
+                f"run {run_id}: {summary['total']} urls  "
+                + "  ".join(f"{k}={v}" for k, v in summary["by_status"].items() if v) + "\n"
+                + "\n".join(f"  {k:<14} run={r['run']} url_log={r['url_log']}"
+                             f"{'' if r['match'] else '  MISMATCH'}"
+                             for k, r in summary["reconciliation"].items())))
+            return
         try:
             rows = store.query_urls(run_id, status, domain, limit, offset)
         except ValueError as exc:

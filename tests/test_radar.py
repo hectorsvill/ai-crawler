@@ -825,3 +825,74 @@ class TestUrlLog:
         assert all(r["status"] == "stored" and r["url"] == "https://ex.com/news" for r in rows)
         assert db.get_page(url="https://ex.com/news")["times_seen"] == 2
         assert db.query_pages(q="News")
+
+
+# Real-world shape (militarnyi.com, 2026-11-15): Crawl-delay and a Disallow come after a
+# blank line inside the "User-agent: *" group. urllib.robotparser used to drop both.
+_BLANK_LINE_ROBOTS = (
+    "User-agent: *\nDisallow: /wp-admin/\nAllow: /*.css$\n\nCrawl-delay: 100\n\n"
+    "#WP Import Export Rule\nDisallow: /wp-content/uploads/private/\n\n"
+    "Sitemap: https://news.example.org/sitemap.xml\n"
+)
+
+
+class TestRobotsBlankLines:
+    UA = "ai-crawler-radar/1.0 (+https://github.com/hectorsvill/ai-crawler)"
+
+    def _rp(self, text):
+        from urllib.robotparser import RobotFileParser
+        from radar.crawler import robots_lines
+        rp = RobotFileParser()
+        rp.parse(robots_lines(text))
+        return rp
+
+    def test_rules_after_blank_line_stay_in_group(self):
+        rp = self._rp(_BLANK_LINE_ROBOTS)
+        assert rp.crawl_delay(self.UA) == 100
+        assert not rp.can_fetch(self.UA, "https://news.example.org/wp-content/uploads/private/a")
+        assert not rp.can_fetch(self.UA, "https://news.example.org/wp-admin/x")
+        assert rp.can_fetch(self.UA, "https://news.example.org/news/story")
+
+    def test_groups_still_split_on_user_agent(self):
+        rp = self._rp("User-agent: badbot\nDisallow: /\n\nUser-agent: *\nDisallow: /private\n")
+        assert rp.can_fetch(self.UA, "https://x.org/public")
+        assert not rp.can_fetch(self.UA, "https://x.org/private/a")
+        assert not rp.can_fetch("badbot", "https://x.org/public")
+
+    def test_crawler_honours_crawl_delay_after_blank_line(self, tmp_path, monkeypatch):
+        from radar.crawler import Seed
+        routes = {
+            "https://news.example.org/robots.txt": (200, _BLANK_LINE_ROBOTS, "text/plain"),
+            "https://news.example.org/rss": (200, RSS, "application/rss+xml"),
+            "https://news.example.org/iran-bahrain-radar": (200, ARTICLE_HTML, "text/html"),
+        }
+        seeds = [Seed(url="https://news.example.org/rss", kind="feed", require_match=True)]
+        result, db, session = _run_crawl(tmp_path, monkeypatch, routes, seeds)
+        assert "https://news.example.org/iran-bahrain-radar" not in session.calls
+        row = _row(db, "https://news.example.org/iran-bahrain-radar", result["run_id"])
+        assert row["status"] == "feed_only" and row["reason"].startswith("crawl-delay")
+        counts = db.url_counts(result["run_id"])
+        assert counts["ok"], counts["reconciliation"]
+        assert counts["reconciliation"]["pages_skipped"]["url_log"] == 1
+
+
+class TestUrlCounts:
+    def test_counts_reconcile_with_run_counters(self, tmp_path, monkeypatch):
+        from radar.crawler import Seed
+        routes = {
+            "https://news.example.org/robots.txt": (404, "", "text/plain"),
+            "https://news.example.org/rss": (200, _TWO_MATCH_RSS, "application/rss+xml"),
+            "https://news.example.org/iran-one": (200, ARTICLE_HTML, "text/html"),
+            "https://news.example.org/iran-two": (403, "no", "text/html"),
+        }
+        seeds = [Seed(url="https://news.example.org/rss", kind="feed", require_match=True)]
+        result, db, session = _run_crawl(tmp_path, monkeypatch, routes, seeds, recent_days=30)
+        c = db.url_counts(result["run_id"])
+        assert c["ok"], c["reconciliation"]
+        assert c["by_status"]["stored"] == 1 and c["by_status"]["feed_only"] == 1
+        assert c["by_status"]["fetched"] == 1
+        reasons = {r["reason"] for r in c["by_reason"] if r["status"] == "not_fetched"}
+        assert {"recent_days", "require_match"} <= reasons
+        assert c["reconciliation"]["pages_failed"] == {"run": 1, "url_log": 1, "match": True}
+        assert c["total"] == sum(c["by_status"].values())
+        assert {"status": "feed_only", "reason": "HTTP 403", "count": 1} in c["by_reason"]
