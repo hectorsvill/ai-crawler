@@ -1,6 +1,8 @@
 # AI Web Crawler
 
 > **AI agents:** read [`AGENTS.md`](AGENTS.md). Every command is non-interactive; data commands support `--json`; exit codes are documented. `main.py radar ...` is a no-LLM topic crawler with its own SQLite DB (`data/crawler.db`).
+>
+> **Docs:** the [project wiki](https://github.com/hectorsvill/ai-crawler/wiki) is the full documentation (install, CLI, radar, politeness, architecture). `AGENTS.md` and `CLAUDE.md` stay in this repository.
 
 A production-ready, modular intelligent web crawler powered by local LLMs via [Ollama](https://ollama.ai).
 
@@ -51,7 +53,7 @@ python -c "import ast, pathlib; [ast.parse(f.read_text()) for f in pathlib.Path(
 # Run the full test suite (no Ollama or network needed)
 pip install pytest pytest-asyncio   # one-time
 pytest tests/ -v
-# Expected: 143 passed
+# Expected: 177 passed (as of d781373; see the wiki Testing page)
 ```
 
 ---
