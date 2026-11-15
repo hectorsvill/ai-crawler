@@ -328,7 +328,7 @@ export CRAWLER_STORAGE__DB_PATH="/data/crawl.db"
 
 ## Radar crawler (no LLM)
 
-`main.py radar` stores pages in `data/crawler.db` (gitignored) and writes **every URL a run encounters** to `run_urls`: seeds, fetches, skips, failures, and candidates that were never requested. `pages` and its FTS5 index stay as they are. `radar crawl --dry-run` prints the plan, including `url_log` (`table`, `key`, `statuses`, `seed_urls`), and does not open the database. A live `radar crawl --json` result adds `urls_logged` (the number of `run_urls` rows for that run).
+`main.py radar` stores pages in `data/crawler.db` (gitignored) and writes the URLs a run acted on to `run_urls`: seeds, fetches, skips, failures, duplicates, and candidates left unfetched because of the page budget or depth. Candidates dropped as too old (`recent_days`), over the per-seed cap (`max_items`), off-topic (`require_match`), over the per-page link cap (`link_cap`) or untitled (`no_title`) are only counted per run in `run_url_counts`. `run_urls` rows older than 30 days are pruned at the start of each crawl (`--keep-url-log-days`, 0 disables); run counters and counts are kept. `pages` and its FTS5 index stay as they are. `radar crawl --dry-run` prints the plan, including `url_log` (`table`, `key`, `statuses`, `seed_urls`), and does not open the database. A live `radar crawl --json` result adds `urls_logged` (the number of `run_urls` rows for that run), `urls_counted` and `url_log_pruned`.
 
 robots.txt is still checked for the real User-Agent (RFC 9309: 4xx means allowed, 5xx or unreachable means disallowed). Record groups split only on `User-agent` lines. Blank lines and comment-only lines are removed before parsing, so a `Crawl-delay` or `Disallow` that follows a blank line in the same group still applies. A `Crawl-delay` above 30 seconds still means one request to that domain per run.
 
@@ -339,6 +339,7 @@ python main.py radar urls --run 3 --json
 python main.py radar urls --run 3 --status skipped --json
 python main.py radar urls --status not_fetched --domain example.com --json
 python main.py radar urls --run 3 --counts --json
+python main.py radar urls --prune --dry-run --json
 ```
 
 Without `--counts`, `--json` is one array, oldest discovery first. Filters: `--run`, `--status`, `--domain` (exact host or a subdomain), `--limit` (default 100), `--offset`.
@@ -374,15 +375,15 @@ Each row is `{id, run_id, url, domain, source_seed, discovered_from, depth, stat
 | `duplicate` | `pages` row written, text omitted (same content hash under another URL) |
 | `fetched` | seed feed document retrieved and parsed, not stored as a page |
 
-`not_fetched` reasons: `budget` (page cap), `max_items` (per-seed cap), `depth`, `link_cap` (per-page follow cap), `require_match`, `recent_days`, `no_title` (a `feed_only` seed whose entry has no title).
+`not_fetched` rows: `budget` (page cap) and `depth`. Counted only (in `run_url_counts`, merged into `--counts`): `max_items` (per-seed cap), `link_cap` (per-page follow cap), `require_match`, `recent_days`, `no_title` (a `feed_only` seed whose entry has no title).
 
 A fetch failure or long Crawl-delay that still saves feed metadata stays `feed_only`. `reason` and `http_status` keep the cause (`HTTP 403`, `crawl-delay 100s`), and `runs.errors` still lists fetch failures. Links rejected by `is_article_link` (nav, other sites, assets) are not logged. The robots.txt URL itself is not logged.
 
 ### Schema v2
 
-`run_urls(id, run_id, url, domain, source_seed, discovered_from, depth, status, reason, http_status, discovered_at, fetched_at)` with `UNIQUE(run_id, url)`.
+`run_urls(id, run_id, url, domain, source_seed, discovered_from, depth, status, reason, http_status, discovered_at, fetched_at)` with `UNIQUE(run_id, url)`; `run_url_counts(run_id, status, reason, n)`.
 
-The first time an older `data/crawler.db` is opened, schema version 2 (`PRAGMA user_version`) adds `run_urls` and any missing columns. Existing `pages` rows are not rewritten. Opening the file again is a no-op. Copy the database before that first open:
+The first time an older `data/crawler.db` is opened, the migration adds `run_urls` and any missing columns (schema version 2, `PRAGMA user_version`) and `run_url_counts` (version 3). Existing `pages` rows are not rewritten. Opening the file again is a no-op. Copy the database before that first open:
 
 ```bash
 cp data/crawler.db data/crawler.db.bak
@@ -423,7 +424,7 @@ Test coverage includes:
 
 | Area | Change |
 |------|--------|
-| **Radar URL log** | Every URL a radar run encounters is stored in `run_urls` and listed with `radar urls` (filters and `--counts`). Schema v2 adds that table on open. robots.txt blank lines no longer drop a later `Crawl-delay` or `Disallow` in the same group. |
+| **Radar URL log** | Every URL a radar run encounters is stored in `run_urls` and listed with `radar urls` (filters and `--counts`). Schema v2/v3 add `run_urls` and `run_url_counts` on open; noisy not-fetched reasons are counted, not logged per URL, and rows older than 30 days are pruned. robots.txt blank lines no longer drop a later `Crawl-delay` or `Disallow` in the same group. |
 | **URL normalization** | All URLs are canonicalized before queuing (lowercase, strip fragments/default ports/trailing slashes, sort query params) preventing duplicate crawls of semantically identical URLs |
 | **Score clamping** | LLM-returned scores outside [0, 1] are clamped rather than rejected, preventing crawl interruption from out-of-range model output |
 | **Action validation** | `NavigatorDecision.action` values not in `{deepen, backtrack, complete}` safely default to `deepen` |
