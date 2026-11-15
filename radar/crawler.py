@@ -165,8 +165,9 @@ def plan(seeds: list[Seed], params: CrawlParams, db_path: str) -> dict[str, Any]
 class RadarCrawler:
     def __init__(self, db: RadarDB, params: CrawlParams) -> None:
         self.db, self.p = db, params
-        self.counters = {"fetched": 0, "stored": 0, "failed": 0, "skipped": 0,
+        self.counters = {"fetched": 0, "stored": 0, "failed": 0, "skipped": 0, "feed_only": 0,
                          "inserted": 0, "updated": 0, "unchanged": 0, "duplicate_content": 0}
+        self._http_fail: dict[str, int] = {}
         self.errors: list[dict[str, str]] = []
         self.skips: list[dict[str, str]] = []
         self.domains: set[str] = set()
@@ -181,7 +182,14 @@ class RadarCrawler:
             timeout=aiohttp.ClientTimeout(total=self.p.timeout), allow_redirects=True,
             max_redirects=5,
         ) as resp:
-            body = await resp.content.read(MAX_BYTES)
+            # NB: StreamReader.read(n) returns whatever is buffered, so loop to EOF/cap.
+            chunks, total = [], 0
+            async for chunk in resp.content.iter_chunked(65536):
+                chunks.append(chunk)
+                total += len(chunk)
+                if total >= MAX_BYTES:
+                    break
+            body = b"".join(chunks)[:MAX_BYTES]
             ctype = resp.headers.get("content-type", "")
             charset = resp.charset or "utf-8"
             return resp.status, ctype, body.decode(charset, errors="replace")
@@ -206,6 +214,7 @@ class RadarCrawler:
         self.counters["fetched"] += 1
         self.domains.add(domain_of(url))
         if status >= 400:
+            self._http_fail[url] = status
             self.counters["failed"] += 1
             self.errors.append({"url": url, "error": f"HTTP {status}"})
             return None
@@ -229,6 +238,21 @@ class RadarCrawler:
         self.counters["stored"] += 1
         self.counters[action] += 1
         return meta
+
+    def _store_feed_only(self, url: str, status: int, seed: Seed, hint: dict, run_id: int) -> None:
+        """Article page refused us (e.g. 403) but the permitted feed described it:
+        keep the feed's title/date/summary so the item is still queryable (no body text)."""
+        tags = set(seed.topics) | set(tag_text(hint.get("title"), hint.get("description")))
+        page = {
+            "url": url, "canonical_url": None, "domain": domain_of(url),
+            "title": hint.get("title"), "description": hint.get("description"),
+            "published_at": hint.get("published_at"), "fetched_at": utcnow(),
+            "http_status": status, "content_hash": None, "text_md": None,
+            "source_seed": seed.url,
+        }
+        _, action = self.db.upsert_page(page, sorted(tags), run_id)
+        self.counters["feed_only"] += 1
+        self.counters[action] += 1
 
     def _recent(self, iso: str | None) -> bool:
         if self.p.recent_days is None or not iso:
@@ -269,6 +293,8 @@ class RadarCrawler:
             async with sem:
                 res = await self._fetch(session, robots, throttle, url)
             if not res:
+                if url in self._http_fail and hint.get("title"):
+                    self._store_feed_only(url, self._http_fail[url], seed, hint, run_id)
                 continue
             status, ctype, html = res
             if "html" not in ctype and "xml" not in ctype and "text" not in ctype:

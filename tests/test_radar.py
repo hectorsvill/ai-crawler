@@ -53,6 +53,7 @@ ATOM = """<?xml version="1.0" encoding="utf-8"?>
 class TestExtract:
     def test_normalize_strips_tracking_and_fragment(self):
         assert normalize_url("HTTPS://Ex.com/a?utm_source=x&id=3#frag") == "https://ex.com/a?id=3"
+        assert normalize_url("https://bbc.co.uk/n/a?at_medium=RSS&at_campaign=rss") == "https://bbc.co.uk/n/a"
 
     def test_domain_of_strips_www(self):
         assert domain_of("https://www.bbc.com/news") == "bbc.com"
@@ -189,6 +190,11 @@ class _FakeResp:
     async def read(self, n=-1):
         return self._body
 
+    async def iter_chunked(self, n):
+        # yield in small pieces to prove the reader loops to EOF
+        for i in range(0, len(self._body), 7):
+            yield self._body[i:i + 7]
+
     async def text(self, errors="strict"):
         return self._body.decode()
 
@@ -245,6 +251,21 @@ class TestRadarCrawler:
         assert "https://news.example.org/football" not in session.calls
         page = db.get_page(url="https://news.example.org/iran-bahrain-radar")
         assert "war-iran-gulf" in page["tags"]
+
+    def test_feed_only_fallback_when_article_403(self, tmp_path, monkeypatch):
+        from radar.crawler import Seed
+        routes = {
+            "https://news.example.org/robots.txt": (404, "", "text/plain"),
+            "https://news.example.org/rss": (200, RSS, "application/rss+xml"),
+            "https://news.example.org/iran-bahrain-radar": (403, "denied", "text/html"),
+        }
+        seeds = [Seed(url="https://news.example.org/rss", kind="feed", require_match=True)]
+        result, db, _ = _run_crawl(tmp_path, monkeypatch, routes, seeds)
+        assert result["counters"]["feed_only"] == 1 and result["counters"]["failed"] == 1
+        page = db.get_page(url="https://news.example.org/iran-bahrain-radar")
+        assert page["http_status"] == 403 and page["text_md"] is None
+        assert page["title"] == "Iran says it struck radar in Bahrain"
+        assert page["published_at"] == "2026-11-13T10:00:00+00:00"
 
     def test_robots_disallow_and_5xx(self, tmp_path, monkeypatch):
         from radar.crawler import Seed

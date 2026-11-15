@@ -18,7 +18,7 @@ try:
 except ImportError:  # pragma: no cover
     HAS_TRAFILATURA = False
 
-_TRACKING = re.compile(r"^(utm_|fbclid|gclid|mc_|ref$|ref_src$|cmpid$)", re.I)
+_TRACKING = re.compile(r"^(utm_|at_|fbclid|gclid|mc_|ref$|ref_src$|cmpid$|ocid$)", re.I)
 
 SKIP_PATH = re.compile(
     r"/(tag|tags|category|categories|author|authors|topic|topics|search|login|signin|"

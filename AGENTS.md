@@ -76,13 +76,15 @@ Own SQLite DB at `data/crawler.db` (gitignored). Seeds: `radar/seeds.yaml`.
 ```
 
 `radar crawl --json` result: `{run_id, status: completed|partial|failed, db_path, elapsed_s,
-counters: {fetched, stored, failed, skipped, inserted, updated, unchanged, duplicate_content},
+counters: {fetched, stored, failed, skipped, feed_only, inserted, updated, unchanged, duplicate_content},
 domains, errors: [{url, error}], skips: [{url, reason}]}`.
 
 Page objects: `{id, url, canonical_url, domain, title, description, published_at, fetched_at,
 http_status, content_hash, source_seed, first_run_id, last_run_id, times_seen, tags[, text_md]}`.
 Re-crawling is idempotent: rows upsert on `url`; identical content under another URL is
-recorded without duplicating text (`duplicate_content`).
+recorded without duplicating text (`duplicate_content`). If an article URL refuses us
+(e.g. HTTP 403) but its feed entry was readable, the feed's title/date/summary is stored with
+`http_status` = the error code and `text_md` = null (`feed_only`).
 
 Topics: `frontier-labs, open-weights, agents-mcp-coding, chips-export-controls, ai-security,
 war-ukraine-russia, war-iran-gulf, taiwan-pla, shtf` (keyword rules in `radar/topics.py`).
