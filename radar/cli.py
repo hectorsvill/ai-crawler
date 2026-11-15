@@ -56,8 +56,8 @@ def crawl_cmd(
     delay: float = typer.Option(2.0, "--delay", min=0.5, help="Min seconds between requests per domain."),
     recent_days: int = typer.Option(7, "--recent-days", help="Skip feed items older than N days (0 = keep all)."),
     keep_url_log_days: int = typer.Option(
-        30, "--keep-url-log-days", min=0,
-        help="Delete run_urls rows of runs started more than N days ago at crawl start (0 = disable).",
+        0, "--keep-url-log-days", min=0,
+        help="At crawl start, delete run_urls of runs older than N days. 0 (default) keeps them forever.",
     ),
     user_agent: Optional[str] = typer.Option(None, "--user-agent", envvar="CRAWLER_RADAR_UA", help="Override UA."),
     db: Optional[str] = DBOpt,
@@ -160,11 +160,11 @@ def urls_cmd(
     ),
     prune: bool = typer.Option(
         False, "--prune",
-        help="Delete run_urls rows older than --keep-url-log-days (runs/counts kept).",
+        help="Delete run_urls rows older than --keep-url-log-days (runs and counts kept).",
     ),
-    keep_url_log_days: int = typer.Option(
-        30, "--keep-url-log-days", min=0,
-        help="With --prune (or crawl): retention in days. 0 disables pruning.",
+    keep_url_log_days: Optional[int] = typer.Option(
+        None, "--keep-url-log-days",
+        help="With --prune: required, N > 0. Delete run_urls for runs started more than N days ago.",
     ),
     dry_run: bool = typer.Option(
         False, "--dry-run", help="With --prune: report what would be deleted, do not write.",
@@ -185,8 +185,11 @@ def urls_cmd(
     if prune and (counts or status is not None or run_id is not None or domain):
         fail("--prune cannot be combined with --run, --status, --domain, or --counts",
              rc.USAGE, as_json)
+    if prune and (keep_url_log_days is None or keep_url_log_days <= 0):
+        fail("--prune needs --keep-url-log-days N with N > 0", rc.USAGE, as_json)
     with _db(db) as store:
         if prune:
+            assert keep_url_log_days is not None
             summary = store.prune_url_log(keep_url_log_days, dry_run=dry_run)
             verb = "would delete" if dry_run else "deleted"
             if summary.get("disabled"):
@@ -204,9 +207,10 @@ def urls_cmd(
             if run_id is None:
                 fail("--counts needs --run N", rc.USAGE, as_json)
             summary = store.url_counts(run_id)
+            extra = (f"  (+{summary['aggregated']} legacy counts)"
+                     if summary["aggregated"] else "")
             emit(summary, as_json, human=(
-                f"run {run_id}: {summary['total']} urls "
-                f"({summary['rows']} rows, {summary['aggregated']} counted)  "
+                f"run {run_id}: {summary['total']} urls ({summary['rows']} rows){extra}  "
                 + "  ".join(f"{k}={v}" for k, v in summary["by_status"].items() if v) + "\n"
                 + "\n".join(f"  {k:<14} run={r['run']} url_log={r['url_log']}"
                              f"{'' if r['match'] else '  MISMATCH'}"

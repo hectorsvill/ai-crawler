@@ -5,8 +5,8 @@ Default path: data/crawler.db (override with --db or CRAWLER_RADAR_DB).
 Tables
   runs       one row per crawl run (params, counters, status)
   pages      one row per stored URL (idempotent upsert on url); content_hash for dedupe
-  run_urls         per-URL log for a run (actionable outcomes only for not_fetched)
-  run_url_counts   per-run aggregate counts for dropped not_fetched reasons
+  run_urls         one row per URL encountered in a run (every status and reason)
+  run_url_counts   convenience mirror of those rows, grouped by status and reason
   tags       topic vocabulary
   page_tags  many-to-many pages<->tags
   pages_fts  FTS5 index over title + text (if the SQLite build supports FTS5)
@@ -14,10 +14,10 @@ Tables
 Schema version (PRAGMA user_version):
   1  original tables (runs, pages, tags, page_tags, pages_fts)
   2  adds run_urls. Opening any older file applies this additively.
-  3  adds run_url_counts: per-run aggregate counts for not_fetched reasons that
-     are not worth a row each (recent_days, max_items, require_match, link_cap,
-     no_title). run_urls rows are pruned after --keep-url-log-days (default 30);
-     runs and run_url_counts are never pruned.
+  3  adds run_url_counts. New runs rewrite it from run_urls so the two match.
+     Older files may still hold count-only totals with no row; those rows and
+     totals are left in place. Retention is not a schema setting: rows are kept
+     until a positive --keep-url-log-days prune.
 """
 
 from __future__ import annotations
@@ -36,12 +36,13 @@ DEFAULT_DB_PATH = os.environ.get(
 # Bump when _migrate applies a new additive change. Existing files upgrade on open.
 SCHEMA_VERSION = 3
 
-# not_fetched reasons that keep a per-URL row (actionable: raise --max-pages or
-# --max-depth). Every other not_fetched reason is only counted in run_url_counts.
-ROW_NOT_FETCHED_REASONS = frozenset({"budget", "depth"})
+# Every not_fetched reason is a run_urls row. run_url_counts mirrors those rows.
+NOT_FETCHED_REASONS = (
+    "budget", "depth", "link_cap", "max_items", "no_title", "recent_days", "require_match",
+)
 
-# Default retention for run_urls rows (days). 0 disables pruning.
-DEFAULT_KEEP_URL_LOG_DAYS = 30
+# 0 keeps run_urls forever. A positive value is an explicit prune window.
+DEFAULT_KEEP_URL_LOG_DAYS = 0
 
 # run_urls.status. ``fetched`` is a seed document (RSS/Atom) that was retrieved and
 # parsed but is not itself a pages row. A fetch that later saved feed metadata is
@@ -295,8 +296,28 @@ class RadarDB:
             )
         self.conn.commit()
 
+    def sync_url_counts(self, run_id: int) -> None:
+        """Replace this run's ``run_url_counts`` with the exact ``run_urls`` totals.
+
+        One group per ``(status, reason)``. A null reason is stored as ``''`` because
+        the counts table requires a reason. Other runs are not touched.
+        """
+        self.conn.execute("DELETE FROM run_url_counts WHERE run_id = ?", (run_id,))
+        self.conn.execute(
+            """INSERT INTO run_url_counts (run_id, status, reason, n)
+               SELECT run_id, status, COALESCE(reason, ''), COUNT(*)
+               FROM run_urls WHERE run_id = ?
+               GROUP BY run_id, status, COALESCE(reason, '')""",
+            (run_id,),
+        )
+        self.conn.commit()
+
     def add_url_counts(self, run_id: int, counts: dict[tuple[str, str], int]) -> None:
-        """Add aggregate (status, reason) -> n counts for a run (accumulates)."""
+        """Add aggregate (status, reason) -> n counts for a run (accumulates).
+
+        Used for historical count-only totals. A finished crawl calls
+        ``sync_url_counts`` instead, so its counts match its rows.
+        """
         for (status, reason), n in counts.items():
             if status not in URL_STATUSES:
                 raise ValueError(f"unknown url status: {status}")
@@ -379,19 +400,44 @@ class RadarDB:
           pages_stored  = stored + duplicate + feed_only
           pages_failed  = failed + feed_only whose reason is "HTTP ..." (403 -> feed metadata)
           pages_skipped = skipped + feed_only whose reason is "crawl-delay ..."
-        A URL requested twice in one run (e.g. a seed that is also another seed's
-        link) counts twice in ``runs`` but once here; ``ok`` is then false.
+        A URL is stored once per run. ``run_url_counts`` for a crawl matches those
+        rows (``aggregated`` is 0). Older count-only totals are added only when
+        they exceed the rows, so they are not counted twice. ``ok`` is false when
+        the run counters and the rows disagree.
         """
         c = self.conn
 
         def q(sql: str) -> int:
             return int(c.execute(sql, (run_id,)).fetchone()[0])
 
-        by_status = {r[0]: r[1] for r in c.execute(
-            "SELECT status, COUNT(*) FROM run_urls WHERE run_id = ? GROUP BY status", (run_id,))}
-        by_reason = [dict(r) for r in c.execute(
+        row_groups = [dict(r) for r in c.execute(
             "SELECT status, reason, COUNT(*) AS count FROM run_urls WHERE run_id = ? "
-            "GROUP BY status, reason ORDER BY status, count DESC", (run_id,))]
+            "GROUP BY status, reason ORDER BY status, count DESC", (run_id,)).fetchall()]
+        by_status: dict[str, int] = {}
+        by_reason: list[dict[str, Any]] = []
+        row_n: dict[tuple[str, str], int] = {}
+        for group in row_groups:
+            status, reason, count = group["status"], group["reason"], int(group["count"])
+            by_status[status] = by_status.get(status, 0) + count
+            by_reason.append({"status": status, "reason": reason, "count": count})
+            key = (status, reason or "")
+            row_n[key] = row_n.get(key, 0) + count
+        # Legacy v3 totals had no row. Add only the surplus so a mirror of the
+        # rows (n == row count, null reason stored as '') is not double-counted.
+        aggregated = 0
+        for group in c.execute(
+            "SELECT status, reason, n AS count FROM run_url_counts WHERE run_id = ? "
+            "ORDER BY status, n DESC", (run_id,)
+        ):
+            status, reason, count = group["status"], group["reason"] or "", int(group["count"])
+            surplus = count - row_n.get((status, reason), 0)
+            if surplus <= 0:
+                continue
+            aggregated += surplus
+            by_status[status] = by_status.get(status, 0) + surplus
+            by_reason.append({
+                "status": status, "reason": reason or None, "count": surplus, "aggregated": True,
+            })
         derived = {
             "pages_fetched": q("SELECT COUNT(*) FROM run_urls WHERE run_id = ? "
                                "AND http_status IS NOT NULL"),
@@ -408,15 +454,9 @@ class RadarDB:
         counters = dict(run) if run else {}
         recon = {k: {"run": counters.get(k), "url_log": v, "match": counters.get(k) == v}
                  for k, v in derived.items()}
-        rows_total = sum(by_status.values())
-        aggregated = [dict(r) for r in c.execute(
-            "SELECT status, reason, n AS count FROM run_url_counts WHERE run_id = ? "
-            "ORDER BY status, n DESC", (run_id,))]
-        for a in aggregated:
-            by_status[a["status"]] = by_status.get(a["status"], 0) + a["count"]
-            by_reason.append({**a, "aggregated": True})
-        return {"run_id": run_id, "total": sum(by_status.values()), "rows": rows_total,
-                "aggregated": sum(a["count"] for a in aggregated),
+        rows_total = sum(int(group["count"]) for group in row_groups)
+        return {"run_id": run_id, "total": rows_total + aggregated, "rows": rows_total,
+                "aggregated": aggregated,
                 "by_status": {k: by_status.get(k, 0) for k in URL_STATUSES},
                 "by_reason": by_reason, "reconciliation": recon,
                 "ok": all(r["match"] for r in recon.values())}

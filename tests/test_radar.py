@@ -500,16 +500,27 @@ def _row(db, url, run_id=None):
     return rows[0]
 
 
-def _no_row(db, url, run_id=None):
-    rows = [r for r in db.query_urls(run_id=run_id, limit=500) if r["url"] == url]
-    assert rows == [], (url, rows)
-
-
 def _reason_count(db, run_id, reason, status="not_fetched"):
     return sum(
         r["count"] for r in db.url_counts(run_id)["by_reason"]
-        if r["status"] == status and r["reason"] == reason
+        if r["status"] == status and r["reason"] == reason and not r.get("aggregated")
     )
+
+
+def _assert_counts_match_rows(db, run_id):
+    """run_url_counts for a crawl is a mirror of that run's run_urls rows."""
+    summary = db.url_counts(run_id)
+    assert summary["aggregated"] == 0
+    assert summary["rows"] == summary["total"] == db.count_urls(run_id)
+    rows = db.query_urls(run_id=run_id, limit=1000)
+    for item in summary["by_reason"]:
+        assert not item.get("aggregated")
+        matched = [r for r in rows if r["status"] == item["status"] and r["reason"] == item["reason"]]
+        assert len(matched) == item["count"]
+    stored = db.conn.execute(
+        "SELECT COALESCE(SUM(n), 0) FROM run_url_counts WHERE run_id = ?", (run_id,)
+    ).fetchone()[0]
+    assert stored == len(rows)
 
 
 class _RaisingSession(_FakeSession):
@@ -715,7 +726,8 @@ class TestUrlLog:
         assert row["discovered_from"] == "https://news.example.org/rss"
         page = db.get_page(url=row["url"])
         assert page["text_md"] is None and page["title"] == "Iran says it struck radar in Bahrain"
-        _no_row(db, "https://news.example.org/football")
+        football = _row(db, "https://news.example.org/football", result["run_id"])
+        assert football["status"] == "not_fetched" and football["reason"] == "require_match"
         assert _reason_count(db, result["run_id"], "require_match") == 1
         assert "https://news.example.org/football" not in _session.calls
         assert db.get_page(url="https://news.example.org/football") is None
@@ -772,16 +784,17 @@ class TestUrlLog:
             recent_days=7, max_pages=10,
         )
         assert _row(db, "https://news.example.org/iran-one")["status"] == "stored"
-        _no_row(db, "https://news.example.org/iran-two")
-        assert _reason_count(db, result["run_id"], "max_items") == 1
-        assert "https://news.example.org/iran-two" not in session.calls
-        _no_row(db, "https://news.example.org/football")
-        assert _reason_count(db, result["run_id"], "require_match") == 1
-        _no_row(db, "https://news.example.org/old-iran")
-        assert _reason_count(db, result["run_id"], "recent_days") == 1
-        assert "https://news.example.org/old-iran" not in session.calls
-        assert db.get_page(url="https://news.example.org/old-iran") is None
-        assert result["urls_counted"] == 3
+        capped = _row(db, "https://news.example.org/iran-two", result["run_id"])
+        assert capped["status"] == "not_fetched" and capped["reason"] == "max_items"
+        assert capped["url"] not in session.calls
+        football = _row(db, "https://news.example.org/football", result["run_id"])
+        assert football["status"] == "not_fetched" and football["reason"] == "require_match"
+        old = _row(db, "https://news.example.org/old-iran", result["run_id"])
+        assert old["status"] == "not_fetched" and old["reason"] == "recent_days"
+        assert old["url"] not in session.calls
+        assert db.get_page(url=old["url"]) is None
+        assert result["urls_counted"] == 0
+        _assert_counts_match_rows(db, result["run_id"])
         db.close()
 
         hub = (
@@ -808,15 +821,18 @@ class TestUrlLog:
             [Seed(url="https://ex.com/news", max_items=3)],
             max_pages=20, max_depth=2,
         )
-        assert _reason_count(db, _result["run_id"], "link_cap") == 2
         for url in ("https://ex.com/news/2026/11/child-story-ccc",
                     "https://ex.com/news/2026/11/child-story-ddd"):
-            _no_row(db, url, _result["run_id"])
+            row = _row(db, url, _result["run_id"])
+            assert row["status"] == "not_fetched" and row["reason"] == "link_cap"
+            assert row["discovered_from"] == "https://ex.com/news/2026/11/hub-story-here"
+            assert row["depth"] == 2
             assert url not in session.calls
             assert db.get_page(url=url) is None
         assert "https://ex.com/news/2026/11/child-story-aaa" in session.calls
         assert "https://ex.com/news/2026/11/child-story-bbb" in session.calls
-        assert _result["urls_counted"] == 2
+        assert _result["urls_counted"] == 0
+        _assert_counts_match_rows(db, _result["run_id"])
 
     def test_second_run_appends_rows_for_the_same_url(self, tmp_path, monkeypatch):
         from radar.crawler import Seed
@@ -902,16 +918,15 @@ class TestUrlCounts:
         assert c["by_status"]["fetched"] == 1
         reasons = {r["reason"] for r in c["by_reason"] if r["status"] == "not_fetched"}
         assert {"recent_days", "require_match"} <= reasons
-        counted = {r["reason"] for r in c["by_reason"]
-                   if r["status"] == "not_fetched" and r.get("aggregated")}
-        assert {"recent_days", "require_match"} <= counted
+        assert _row(db, "https://news.example.org/old-iran", result["run_id"])["reason"] == "recent_days"
+        assert _row(db, "https://news.example.org/football", result["run_id"])["reason"] == "require_match"
         assert c["reconciliation"]["pages_failed"] == {"run": 1, "url_log": 1, "match": True}
         assert c["total"] == sum(c["by_status"].values())
-        assert c["total"] == c["rows"] + c["aggregated"]
-        assert c["aggregated"] >= 2
+        assert c["aggregated"] == 0 and c["total"] == c["rows"]
         assert {"status": "feed_only", "reason": "HTTP 403", "count": 1} in c["by_reason"]
         assert result["urls_logged"] == c["rows"]
-        assert result["urls_counted"] == c["aggregated"]
+        assert result["urls_counted"] == 0
+        _assert_counts_match_rows(db, result["run_id"])
 
 
 class TestUrlLogCountsAndPrune:
@@ -1029,3 +1044,66 @@ class TestUrlLogCountsAndPrune:
         )
         assert db.count_urls(stale) == 1
         assert result["url_log_pruned"]["rows"] == 0
+        assert result["url_log_pruned"]["disabled"] is True
+
+    def test_default_crawl_does_not_prune(self, tmp_path, monkeypatch):
+        from datetime import datetime, timedelta, timezone
+        from radar.crawler import CrawlParams, Seed
+        assert CrawlParams().keep_url_log_days == 0
+        path = tmp_path / "c.db"
+        with RadarDB(path) as db:
+            old = db.start_run({})
+            started = (datetime.now(timezone.utc) - timedelta(days=40)).replace(
+                microsecond=0).isoformat()
+            db.conn.execute("UPDATE runs SET started_at = ? WHERE id = ?", (started, old))
+            db.conn.commit()
+            db.log_url({"run_id": old, "url": "https://stale.com/keep", "domain": "stale.com",
+                        "status": "not_fetched", "reason": "max_items"})
+            db.finish_run(old, "completed", {}, [])
+        routes = {
+            "https://ex.com/robots.txt": (404, "", "text/plain"),
+            "https://ex.com/news": (
+                200, "<html><head><title>News</title></head><body>Hi</body></html>", "text/html"),
+        }
+        result, db, _session = _run_crawl(
+            tmp_path, monkeypatch, routes, [Seed(url="https://ex.com/news")], max_pages=2,
+        )
+        assert db.count_urls(old) == 1
+        assert result["url_log_pruned"]["disabled"] is True
+        assert result["url_log_pruned"]["rows"] == 0
+
+    def test_no_title_is_a_row(self, tmp_path, monkeypatch):
+        from radar.crawler import Seed
+        rss = """<?xml version="1.0"?><rss version="2.0"><channel><title>t</title>
+        <item><title></title><link>https://news.example.org/untitled-item</link>
+        <pubDate>Fri, 13 Nov 2026 10:00:00 GMT</pubDate></item>
+        </channel></rss>"""
+        routes = {
+            "https://news.example.org/robots.txt": (404, "", "text/plain"),
+            "https://news.example.org/rss": (200, rss, "application/rss+xml"),
+        }
+        result, db, session = _run_crawl(
+            tmp_path, monkeypatch, routes,
+            [Seed(url="https://news.example.org/rss", kind="feed", feed_only=True)],
+        )
+        row = _row(db, "https://news.example.org/untitled-item", result["run_id"])
+        assert row["status"] == "not_fetched" and row["reason"] == "no_title"
+        assert row["url"] not in session.calls
+        _assert_counts_match_rows(db, result["run_id"])
+
+    def test_same_url_is_fetched_once(self, tmp_path, monkeypatch):
+        from radar.crawler import Seed
+        html = "<html><head><title>News</title></head><body>Hi</body></html>"
+        routes = {
+            "https://ex.com/robots.txt": (404, "", "text/plain"),
+            "https://ex.com/news": (200, html, "text/html"),
+        }
+        seeds = [Seed(url="https://ex.com/news"), Seed(url="https://ex.com/news")]
+        result, db, session = _run_crawl(tmp_path, monkeypatch, routes, seeds, max_pages=5)
+        assert session.calls.count("https://ex.com/news") == 1
+        assert result["counters"]["fetched"] == 1
+        assert db.count_urls(result["run_id"]) == 1
+        assert db.get_page(url="https://ex.com/news")["times_seen"] == 1
+        summary = db.url_counts(result["run_id"])
+        assert summary["ok"] and summary["aggregated"] == 0
+        assert summary["by_status"]["stored"] == 1

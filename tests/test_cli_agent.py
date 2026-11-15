@@ -33,6 +33,7 @@ def test_radar_crawl_dry_run_json(tmp_path):
     assert plan["seeds"] and not db.exists()  # dry run never creates the DB
     assert plan["url_log"]["table"] == "run_urls"
     assert plan["url_log"]["seed_urls"]
+    assert plan["limits"]["keep_url_log_days"] == 0
 
 
 def test_radar_crawl_missing_seeds_file(tmp_path):
@@ -200,13 +201,24 @@ def test_radar_urls_prune_dry_run_and_exit_codes(tmp_path):
     store.close()
     runner = CliRunner()
     r = runner.invoke(app, ["radar", "urls", "--db", db, "--json", "--prune", "--dry-run"])
+    assert r.exit_code == rc.USAGE
+    assert json.loads(r.stdout)["exit_code"] == rc.USAGE
+    r = runner.invoke(app, ["radar", "urls", "--db", db, "--json", "--prune",
+                            "--keep-url-log-days", "0"])
+    assert r.exit_code == rc.USAGE
+    store = RadarDB(db)
+    assert store.count_urls(run) == 1
+    store.close()
+    r = runner.invoke(app, ["radar", "urls", "--db", db, "--json", "--prune", "--dry-run",
+                            "--keep-url-log-days", "30"])
     assert r.exit_code == 0, r.output
     d = json.loads(r.stdout)
     assert d["dry_run"] and d["rows"] == 1 and run in d["runs"]
     store = RadarDB(db)
     assert store.count_urls(run) == 1
     store.close()
-    r = runner.invoke(app, ["radar", "urls", "--db", db, "--json", "--prune"])
+    r = runner.invoke(app, ["radar", "urls", "--db", db, "--json", "--prune",
+                            "--keep-url-log-days", "30"])
     assert r.exit_code == 0, r.output
     d = json.loads(r.stdout)
     assert not d["dry_run"] and d["rows"] == 1
