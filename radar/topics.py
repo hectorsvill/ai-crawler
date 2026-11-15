@@ -48,8 +48,10 @@ TOPIC_PATTERNS: dict[str, list[str]] = {
     ],
     "war-drones": [
         r"\b(drones?|uavs?|uas|fpv)\b.{0,60}\b(war|strikes?|attacks?|military|front ?lines?|"
-        r"battlefield|troops|army|forces|combat|kamikaze)\b",
-        r"\b(war|strikes?|attacks?|military|front ?lines?|battlefield|army|forces|combat)\b"
+        r"battlefield|troops|army|forces|combat|kamikaze|air ?force|air ?bases?|airfields?|"
+        r"warships?|navy|naval|defen[cs]e)\b",
+        r"\b(war|strikes?|attacks?|military|front ?lines?|battlefield|army|forces|combat|"
+        r"air ?force|air ?bases?|airfields?|warships?|navy)\b"
         r".{0,60}\b(drones?|uavs?|fpv)\b",
         r"\bshahed", r"\bgeran-?\d?\b", r"\bloitering munitions?\b",
         r"\b(naval|sea|maritime|surface) drones?\b", r"\busvs?\b", r"\bunmanned surface vessels?\b",

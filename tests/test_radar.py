@@ -321,6 +321,7 @@ class TestWarDrones:
         "Loitering munitions in high demand",
         "Geran-2 attacks surge",
         "Navy orders more USVs",
+        "Suspected Drones Over RAF Lakenheath Just Triggered Security Response: U.S. Air Force",
     ])
     def test_headlines_tagged(self, title):
         assert "war-drones" in tag_text(title)
