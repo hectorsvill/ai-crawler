@@ -46,6 +46,18 @@ TOPIC_PATTERNS: dict[str, list[str]] = {
         r"\btaiwan", r"\bpla\b", r"\bpeople'?s liberation army\b", r"\bsouth china sea\b",
         r"\btaiwan strait\b", r"\bchina coast guard\b",
     ],
+    "war-drones": [
+        r"\b(drones?|uavs?|uas|fpv)\b.{0,60}\b(war|strikes?|attacks?|military|front ?lines?|"
+        r"battlefield|troops|army|forces|combat|kamikaze)\b",
+        r"\b(war|strikes?|attacks?|military|front ?lines?|battlefield|army|forces|combat)\b"
+        r".{0,60}\b(drones?|uavs?|fpv)\b",
+        r"\bshahed", r"\bgeran-?\d?\b", r"\bloitering munitions?\b",
+        r"\b(naval|sea|maritime|surface) drones?\b", r"\busvs?\b", r"\bunmanned surface vessels?\b",
+        r"\binterceptor drones?\b", r"\bcounter-?(drone|uas)\b", r"\bc-uas\b",
+        r"\bdrone swarms?\b", r"\bswarming drones?\b",
+        r"\bautonomous (drones?|weapons?|strike)", r"\bfpv\b",
+        r"\bdrone (strike|attack|warfare|war|wall)s?\b",
+    ],
     "shtf": [
         r"\bnuclear\b", r"\bblackout\b", r"\bgrid (failure|attack)", r"\bmartial law\b",
         r"\bundersea cable", r"\bevacuat", r"\bstate of emergency\b", r"\bmobiliz",

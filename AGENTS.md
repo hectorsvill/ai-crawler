@@ -40,7 +40,8 @@ the provider's API key set). `providers` lists which keys are configured (names 
   `CRAWLER_STORAGE__DB_PATH`).
 - **Politeness** (radar): honest UA `ai-crawler-radar/1.0 (+https://github.com/hectorsvill/ai-crawler)`,
   robots.txt checked for that UA (RFC 9309: 4xx = allowed, 5xx/unreachable = disallowed),
-  `Crawl-delay` honoured, >= 2 s between requests per domain (+ jitter), concurrency 2,
+  `Crawl-delay` honoured (above 30 s: only one request to that domain per run; seeds may set
+`feed_only: true` to store feed entries without fetching articles), >= 2 s between requests per domain (+ jitter), concurrency 2,
   3 MB response cap, hard `--max-pages` budget.
 
 ## Radar crawler (no LLM) — `main.py radar ...`
@@ -88,7 +89,7 @@ recorded without duplicating text (`duplicate_content`). If an article URL refus
 `http_status` = the error code and `text_md` = null (`feed_only`).
 
 Topics: `frontier-labs, open-weights, agents-mcp-coding, chips-export-controls, ai-security,
-war-ukraine-russia, war-iran-gulf, taiwan-pla, shtf` (keyword rules in `radar/topics.py`).
+war-ukraine-russia, war-iran-gulf, taiwan-pla, war-drones, shtf` (keyword rules in `radar/topics.py`).
 Tags are keyword matches, not judgments; verify before reporting anything.
 
 ### DB schema (`radar/db.py`)

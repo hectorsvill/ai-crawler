@@ -34,3 +34,11 @@ seeds:
   - {url: "https://feeds.bbci.co.uk/news/world/rss.xml", kind: feed, topics: [], require_match: true, max_items: 12}
   - {url: "https://news.usni.org/feed", kind: feed, topics: [], require_match: true, max_items: 6}
   - {url: "https://www.defensenews.com/arc/outboundfeeds/rss/", kind: feed, topics: [], require_match: true, max_items: 6}
+  # ── War drones / defense tech ───────────────────────────────────
+  # (thedefensepost.com skipped: its /feed/ returns an HTML page, no RSS, as of 2026-11-15)
+  - {url: "https://defensescoop.com/feed/", kind: feed, topics: [], require_match: true, max_items: 8}
+  - {url: "https://breakingdefense.com/feed/", kind: feed, topics: [], require_match: true, max_items: 8}
+  - {url: "https://www.twz.com/feed", kind: feed, topics: [], require_match: true, max_items: 8}
+  - {url: "https://www.defensenews.com/arc/outboundfeeds/rss/category/unmanned/?outputType=xml", kind: feed, topics: [war-drones], max_items: 6}
+  # militarnyi robots.txt sets Crawl-delay: 100 -> read the feed only, never the articles
+  - {url: "https://militarnyi.com/en/news/feed/", kind: feed, topics: [], require_match: true, feed_only: true, max_items: 10}

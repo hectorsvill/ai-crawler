@@ -309,3 +309,54 @@ def test_default_seeds_file_loads():
     assert all(s.kind in ("html", "feed") for s in seeds)
     war = load_seeds(topics=["war-ukraine-russia"])
     assert any("kyivindependent" in s.url for s in war)
+
+
+class TestWarDrones:
+    @pytest.mark.parametrize("title", [
+        "Russia launches 400 Shahed drones at Kyiv overnight",
+        "Ukraine sea drones hit Russian tanker",
+        "Army buys interceptor drones to counter FPV threat",
+        "Pentagon tests drone swarm autonomy on the battlefield",
+        "New C-UAS system fielded",
+        "Loitering munitions in high demand",
+        "Geran-2 attacks surge",
+        "Navy orders more USVs",
+    ])
+    def test_headlines_tagged(self, title):
+        assert "war-drones" in tag_text(title)
+
+    @pytest.mark.parametrize("title", [
+        "Amazon expands drone delivery to Texas",
+        "Best camera drones for 2026",
+    ])
+    def test_civilian_drones_not_tagged(self, title):
+        assert "war-drones" not in tag_text(title)
+
+
+class TestFeedOnlyAndCrawlDelay:
+    def test_feed_only_seed_never_fetches_articles(self, tmp_path, monkeypatch):
+        from radar.crawler import Seed
+        routes = {
+            "https://news.example.org/robots.txt": (200, "User-agent: *\nCrawl-delay: 100\n", "text/plain"),
+            "https://news.example.org/rss": (200, RSS, "application/rss+xml"),
+        }
+        seeds = [Seed(url="https://news.example.org/rss", kind="feed", require_match=True, feed_only=True)]
+        result, db, session = _run_crawl(tmp_path, monkeypatch, routes, seeds)
+        assert session.calls.count("https://news.example.org/iran-bahrain-radar") == 0
+        assert result["counters"]["feed_only"] == 1 and result["counters"]["stored"] == 1
+        assert result["status"] == "completed"
+        assert db.get_page(url="https://news.example.org/iran-bahrain-radar")["text_md"] is None
+
+    def test_long_crawl_delay_limits_to_one_request(self, tmp_path, monkeypatch):
+        from radar.crawler import Seed
+        routes = {
+            "https://news.example.org/robots.txt": (200, "User-agent: *\nCrawl-delay: 100\n", "text/plain"),
+            "https://news.example.org/rss": (200, RSS, "application/rss+xml"),
+            "https://news.example.org/iran-bahrain-radar": (200, ARTICLE_HTML, "text/html"),
+        }
+        seeds = [Seed(url="https://news.example.org/rss", kind="feed", require_match=True)]
+        result, db, session = _run_crawl(tmp_path, monkeypatch, routes, seeds)
+        assert "https://news.example.org/iran-bahrain-radar" not in session.calls
+        assert any("crawl-delay" in s["reason"] for s in result["skips"])
+        page = db.get_page(url="https://news.example.org/iran-bahrain-radar")
+        assert page["title"] == "Iran says it struck radar in Bahrain" and page["text_md"] is None
