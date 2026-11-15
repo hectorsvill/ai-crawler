@@ -32,8 +32,7 @@ class CrawlConfig(BaseModel):
     rate_limit_per_domain: float = 2.0
     delay_range: list[float] = Field(default=[1.0, 3.0])
     user_agents: list[str] = Field(default=[
-        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
-        "(KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+        "ai-crawler/1.0 (+https://github.com/hectorsvill/ai-crawler)",
     ])
     domain_allowlist: list[str] = Field(default=[])
     domain_denylist: list[str] = Field(default=[])

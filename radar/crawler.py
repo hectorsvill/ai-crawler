@@ -1,0 +1,306 @@
+"""radar/crawler.py — polite, deterministic topic crawler (no LLM required).
+
+Pipeline per run:
+  1. Load seeds (YAML). Each seed is an RSS/Atom feed or an HTML index page.
+  2. Fetch each seed (robots.txt checked first) and collect candidate article URLs.
+     Generic feeds (``require_match: true``) are pre-filtered by topic keywords on
+     the feed title/description so off-topic articles are never fetched.
+  3. Fetch candidates breadth-first up to --max-depth / --max-pages, extract
+     title, canonical URL, published date, and Markdown text, tag by topic, and
+     upsert into the radar DB.
+
+Politeness: honest User-Agent, robots.txt (RFC 9309: 5xx/unreachable => disallow),
+Crawl-delay honoured, per-domain minimum delay, small global concurrency,
+response size cap.
+"""
+
+from __future__ import annotations
+
+import asyncio
+import logging
+import os
+import random
+import time
+from dataclasses import dataclass, field
+from datetime import datetime, timedelta, timezone
+from pathlib import Path
+from typing import Any
+from urllib.parse import urlparse
+from urllib.robotparser import RobotFileParser
+
+import yaml
+
+from radar.db import RadarDB, utcnow
+from radar.extract import (
+    content_hash, domain_of, extract_metadata, is_article_link, normalize_url, parse_feed,
+)
+from radar.topics import tag_text
+
+logger = logging.getLogger("radar")
+
+DEFAULT_UA = os.environ.get(
+    "CRAWLER_RADAR_UA",
+    "ai-crawler-radar/1.0 (+https://github.com/hectorsvill/ai-crawler)",
+)
+DEFAULT_SEEDS = Path(__file__).resolve().parent / "seeds.yaml"
+MAX_BYTES = 3_000_000
+
+
+@dataclass
+class Seed:
+    url: str
+    kind: str = "html"              # html | feed
+    topics: list[str] = field(default_factory=list)
+    max_items: int = 10
+    require_match: bool = False     # only keep items whose title/desc match a topic
+    name: str | None = None
+
+
+@dataclass
+class CrawlParams:
+    max_pages: int = 200
+    max_depth: int = 1
+    concurrency: int = 2
+    delay: float = 2.0              # min seconds between requests to the same domain
+    timeout: float = 20.0
+    recent_days: int | None = 7     # drop feed items older than this (None = keep all)
+    user_agent: str = DEFAULT_UA
+    topics: list[str] | None = None  # only seeds carrying one of these topics
+
+
+def load_seeds(path: str | Path | None = None, topics: list[str] | None = None) -> list[Seed]:
+    p = Path(path or DEFAULT_SEEDS)
+    if not p.exists():
+        raise FileNotFoundError(f"Seeds file not found: {p}")
+    raw = yaml.safe_load(p.read_text()) or {}
+    seeds = [Seed(**s) for s in (raw.get("seeds") or [])]
+    if topics:
+        wanted = set(topics)
+        seeds = [s for s in seeds if wanted & set(s.topics) or (s.require_match and not s.topics)]
+    return seeds
+
+
+class RobotsPolicy:
+    """Per-origin robots.txt cache evaluated for our real User-Agent."""
+
+    def __init__(self, session: Any, user_agent: str, timeout: float = 10.0) -> None:
+        self.session, self.ua, self.timeout = session, user_agent, timeout
+        self._cache: dict[str, RobotFileParser | None] = {}
+        self._locks: dict[str, asyncio.Lock] = {}
+
+    async def _load(self, origin: str) -> RobotFileParser | None:
+        """Return parser; None means 'disallow everything' (robots unreachable/5xx)."""
+        import aiohttp
+        rp = RobotFileParser()
+        try:
+            async with self.session.get(
+                origin + "/robots.txt", headers={"User-Agent": self.ua},
+                timeout=aiohttp.ClientTimeout(total=self.timeout), allow_redirects=True,
+            ) as resp:
+                if resp.status >= 500:
+                    return None
+                if resp.status >= 400:      # RFC 9309: 4xx => no restrictions
+                    rp.parse([])
+                    return rp
+                rp.parse((await resp.text(errors="replace")).splitlines())
+                return rp
+        except Exception as exc:  # network error => be conservative
+            logger.warning("robots.txt unreachable for %s (%s) — treating as disallow", origin, exc)
+            return None
+
+    async def check(self, url: str) -> tuple[bool, float | None]:
+        p = urlparse(url)
+        origin = f"{p.scheme}://{p.netloc}"
+        lock = self._locks.setdefault(origin, asyncio.Lock())
+        async with lock:
+            if origin not in self._cache:
+                self._cache[origin] = await self._load(origin)
+        rp = self._cache[origin]
+        if rp is None:
+            return False, None
+        delay = rp.crawl_delay(self.ua)
+        return rp.can_fetch(self.ua, url), (float(delay) if delay else None)
+
+
+class DomainThrottle:
+    def __init__(self, delay: float) -> None:
+        self.delay = delay
+        self._last: dict[str, float] = {}
+        self._locks: dict[str, asyncio.Lock] = {}
+
+    async def wait(self, url: str, crawl_delay: float | None = None) -> None:
+        d = domain_of(url)
+        lock = self._locks.setdefault(d, asyncio.Lock())
+        async with lock:
+            gap = max(self.delay, crawl_delay or 0) + random.uniform(0, 0.5)
+            elapsed = time.monotonic() - self._last.get(d, 0)
+            if elapsed < gap:
+                await asyncio.sleep(gap - elapsed)
+            self._last[d] = time.monotonic()
+
+
+def plan(seeds: list[Seed], params: CrawlParams, db_path: str) -> dict[str, Any]:
+    """Offline description of what a crawl would do (used by --dry-run)."""
+    return {
+        "dry_run": True,
+        "db_path": db_path,
+        "user_agent": params.user_agent,
+        "limits": {
+            "max_pages": params.max_pages, "max_depth": params.max_depth,
+            "concurrency": params.concurrency, "per_domain_delay_s": params.delay,
+            "recent_days": params.recent_days,
+        },
+        "seeds": [
+            {"url": s.url, "kind": s.kind, "topics": s.topics, "max_items": s.max_items,
+             "require_match": s.require_match}
+            for s in seeds
+        ],
+        "domains": sorted({domain_of(s.url) for s in seeds}),
+        "max_possible_fetches": min(
+            params.max_pages, len(seeds) + sum(s.max_items for s in seeds) * max(params.max_depth, 1)
+        ),
+    }
+
+
+class RadarCrawler:
+    def __init__(self, db: RadarDB, params: CrawlParams) -> None:
+        self.db, self.p = db, params
+        self.counters = {"fetched": 0, "stored": 0, "failed": 0, "skipped": 0,
+                         "inserted": 0, "updated": 0, "unchanged": 0, "duplicate_content": 0}
+        self.errors: list[dict[str, str]] = []
+        self.skips: list[dict[str, str]] = []
+        self.domains: set[str] = set()
+        self._seen: set[str] = set()
+        self._budget = params.max_pages
+
+    async def _get(self, session: Any, url: str) -> tuple[int, str, str]:
+        import aiohttp
+        async with session.get(
+            url, headers={"User-Agent": self.p.user_agent,
+                          "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.5"},
+            timeout=aiohttp.ClientTimeout(total=self.p.timeout), allow_redirects=True,
+            max_redirects=5,
+        ) as resp:
+            body = await resp.content.read(MAX_BYTES)
+            ctype = resp.headers.get("content-type", "")
+            charset = resp.charset or "utf-8"
+            return resp.status, ctype, body.decode(charset, errors="replace")
+
+    async def _fetch(self, session: Any, robots: RobotsPolicy, throttle: DomainThrottle,
+                     url: str) -> tuple[int, str, str] | None:
+        if self._budget <= 0:
+            return None
+        allowed, crawl_delay = await robots.check(url)
+        if not allowed:
+            self.counters["skipped"] += 1
+            self.skips.append({"url": url, "reason": "robots.txt"})
+            return None
+        self._budget -= 1
+        await throttle.wait(url, crawl_delay)
+        try:
+            status, ctype, text = await self._get(session, url)
+        except Exception as exc:
+            self.counters["failed"] += 1
+            self.errors.append({"url": url, "error": f"{type(exc).__name__}: {exc}"[:300]})
+            return None
+        self.counters["fetched"] += 1
+        self.domains.add(domain_of(url))
+        if status >= 400:
+            self.counters["failed"] += 1
+            self.errors.append({"url": url, "error": f"HTTP {status}"})
+            return None
+        return status, ctype, text
+
+    def _store(self, url: str, status: int, html: str, seed: Seed, hint: dict, run_id: int
+               ) -> dict:
+        meta = extract_metadata(html, url)
+        title = meta["title"] or hint.get("title")
+        desc = meta["description"] or hint.get("description")
+        tags = set(seed.topics) | set(tag_text(title, desc, meta["text_md"]))
+        page = {
+            "url": url, "canonical_url": meta["canonical_url"], "domain": domain_of(url),
+            "title": title, "description": desc,
+            "published_at": meta["published_at"] or hint.get("published_at"),
+            "fetched_at": utcnow(), "http_status": status,
+            "content_hash": content_hash(meta["text_md"] or html),
+            "text_md": meta["text_md"], "source_seed": seed.url,
+        }
+        _, action = self.db.upsert_page(page, sorted(tags), run_id)
+        self.counters["stored"] += 1
+        self.counters[action] += 1
+        return meta
+
+    def _recent(self, iso: str | None) -> bool:
+        if self.p.recent_days is None or not iso:
+            return True
+        try:
+            dt = datetime.fromisoformat(iso)
+        except ValueError:
+            return True
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        return dt >= datetime.now(timezone.utc) - timedelta(days=self.p.recent_days)
+
+    async def _crawl_seed(self, session: Any, robots: RobotsPolicy, throttle: DomainThrottle,
+                          seed: Seed, run_id: int, sem: asyncio.Semaphore) -> None:
+        async with sem:
+            res = await self._fetch(session, robots, throttle, seed.url)
+        if not res:
+            return
+        status, ctype, text = res
+        candidates: list[tuple[str, dict]] = []
+        if seed.kind == "feed" or "xml" in ctype and "html" not in ctype:
+            for it in parse_feed(text, seed.url):
+                if not self._recent(it["published_at"]):
+                    continue
+                if seed.require_match and not tag_text(it["title"], it["description"], body_min_hits=1):
+                    continue
+                candidates.append((it["url"], it))
+        else:
+            meta = self._store(normalize_url(seed.url), status, text, seed, {}, run_id)
+            candidates = [(l, {}) for l in meta["links"] if is_article_link(l, seed.url)]
+
+        frontier = [(u, h, 1) for u, h in candidates[: seed.max_items]]
+        while frontier and self._budget > 0:
+            url, hint, depth = frontier.pop(0)
+            if url in self._seen:
+                continue
+            self._seen.add(url)
+            async with sem:
+                res = await self._fetch(session, robots, throttle, url)
+            if not res:
+                continue
+            status, ctype, html = res
+            if "html" not in ctype and "xml" not in ctype and "text" not in ctype:
+                self.counters["skipped"] += 1
+                self.skips.append({"url": url, "reason": f"content-type {ctype}"})
+                continue
+            meta = self._store(url, status, html, seed, hint, run_id)
+            if depth < self.p.max_depth:
+                more = [l for l in meta["links"] if is_article_link(l, url) and l not in self._seen]
+                frontier.extend((l, {}, depth + 1) for l in more[: max(2, seed.max_items // 3)])
+
+    async def run(self, seeds: list[Seed], run_params: dict) -> dict[str, Any]:
+        import aiohttp
+        run_id = self.db.start_run(run_params)
+        started = time.monotonic()
+        status = "failed"
+        try:
+            async with aiohttp.ClientSession() as session:
+                robots = RobotsPolicy(session, self.p.user_agent)
+                throttle = DomainThrottle(self.p.delay)
+                sem = asyncio.Semaphore(max(1, self.p.concurrency))
+                await asyncio.gather(*(
+                    self._crawl_seed(session, robots, throttle, s, run_id, sem) for s in seeds
+                ))
+            status = "completed" if self.counters["stored"] else "failed"
+            if status == "completed" and self.counters["failed"]:
+                status = "partial"
+        finally:
+            self.db.finish_run(run_id, status, self.counters, self.errors)
+        return {
+            "run_id": run_id, "status": status, "db_path": self.db.path,
+            "elapsed_s": round(time.monotonic() - started, 1),
+            "counters": self.counters, "domains": sorted(self.domains),
+            "errors": self.errors, "skips": self.skips,
+        }

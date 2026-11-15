@@ -446,13 +446,15 @@ async def check_ollama_reachable(base_url: str = "http://localhost:11434") -> bo
             ) as resp:
                 return resp.status == 200
     except Exception:
+        import sys
         print(
             "\n[ERROR] Cannot reach Ollama at "
             f"{base_url}\n"
             "  → Make sure Ollama is installed and running:\n"
             "      ollama serve\n"
             "  → Then verify with:\n"
-            "      curl http://localhost:11434/api/tags\n"
+            "      curl http://localhost:11434/api/tags\n",
+            file=sys.stderr,
         )
         return False
 

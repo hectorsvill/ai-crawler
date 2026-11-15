@@ -11,13 +11,10 @@ crawl:
   max_pages: 500
   rate_limit_per_domain: 2  # requests per second
   delay_range: [1.0, 3.0]
+  # Honest, identifiable UA (robots.txt rules are evaluated against it).
+  # Add browser UAs here only for sites whose terms allow it.
   user_agents:
-    - "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
-    - "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
-    - "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
-    - "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:121.0) Gecko/20100101 Firefox/121.0"
-    - "Mozilla/5.0 (Macintosh; Intel Mac OS X 14_1) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.2 Safari/605.1.15"
-    - "Mozilla/5.0 (X11; Ubuntu; Linux x86_64; rv:121.0) Gecko/20100101 Firefox/121.0"
+    - "ai-crawler/1.0 (+https://github.com/hectorsvill/ai-crawler)"
   domain_allowlist: []
   domain_denylist: []
   use_playwright_for: []  # domain patterns requiring JS rendering

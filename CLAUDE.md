@@ -15,6 +15,7 @@ Python version: 3.12. The venv is at `ai-crawler/.venv/`.
 
 ## Documentation
 
+- **Agent guide (start here)**: [`AGENTS.md`](AGENTS.md) — exact commands, `--json`/`--dry-run`, exit codes, radar DB schema
 - **Full usage guide**: [`docs/usage.md`](docs/usage.md) — CLI reference, workflow modes, config, agents, Python API, troubleshooting
 - **Real-world examples**: [`use_cases/`](use_cases/) — runnable scripts for HackerNews, Wikipedia, GitHub Trending
 

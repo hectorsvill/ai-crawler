@@ -136,7 +136,7 @@ class TestCrawlEngineAPI:
         from crawler.engine import CrawlEngine
         engine = CrawlEngine()
         assert engine._timeout == 30
-        assert "Mozilla" in engine._user_agent
+        assert "ai-crawler" in engine._user_agent  # honest, identifiable default UA
 
     def test_custom_user_agent(self):
         from crawler.engine import CrawlEngine

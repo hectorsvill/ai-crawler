@@ -10,6 +10,12 @@ Commands:
   research-search  Full-text search across all stored research papers.
   research-list    Browse all stored research papers.
   research-show    Show full details for one paper by ID.
+  doctor           Check environment readiness (deps, Ollama, models, DB).
+  radar ...        Deterministic topic crawler with its own DB (no LLM needed).
+
+Agent use: every command is non-interactive; data-returning commands accept
+--json (data on stdout, human/progress output on stderr); live crawls accept
+--dry-run; exit codes are defined in utils/exit_codes.py. See AGENTS.md.
 
 Uses Typer for CLI parsing and Rich for terminal output.
 """
@@ -27,6 +33,8 @@ import typer
 from rich.console import Console
 from rich.table import Table
 
+from utils import exit_codes as rc
+
 # Configure logging early
 logging.basicConfig(
     level=logging.INFO,
@@ -42,7 +50,27 @@ app = typer.Typer(
     help="Intelligent AI web crawler powered by local Ollama models.",
     add_completion=False,
 )
-console = Console()
+# Human-readable output goes to stderr so stdout stays clean for --json data.
+console = Console(stderr=True)
+
+from radar.cli import radar_app  # noqa: E402
+
+app.add_typer(radar_app, name="radar")
+
+
+def _emit_json(data) -> None:
+    """Write machine-readable JSON to stdout."""
+    sys.stdout.write(json.dumps(data, indent=2, default=str) + "\n")
+    sys.stdout.flush()
+
+
+def _fail(msg: str, code: int, as_json: bool = False) -> None:
+    """Report an error (JSON on stdout when requested) and exit with *code*."""
+    if as_json:
+        _emit_json({"error": msg, "exit_code": code})
+    else:
+        console.print(f"[red]{msg}[/red]")
+    raise typer.Exit(code)
 
 
 # ── Crawl command ──────────────────────────────────────────────────────────────
@@ -67,10 +95,19 @@ def crawl(
     max_depth: Optional[int] = typer.Option(None, "--max-depth", help="Override max depth."),
     model: Optional[str] = typer.Option(None, "--model", help="Override extractor model name."),
     verbose: bool = typer.Option(False, "--verbose", "-v", help="Enable debug logging."),
+    dry_run: bool = typer.Option(
+        False, "--dry-run", help="Validate inputs, config and Ollama; print the plan; no crawl."
+    ),
+    as_json: bool = typer.Option(False, "--json", help="Emit a JSON result on stdout."),
 ) -> None:
-    """Start a new intelligent crawl session."""
+    """Start a new intelligent crawl session (LLM-driven; needs Ollama)."""
     if verbose:
         logging.getLogger().setLevel(logging.DEBUG)
+    if workflow not in ("auto", "simple", "langgraph", "crewai"):
+        _fail(f"Unknown workflow: {workflow}", rc.USAGE, as_json)
+    if not start_url:
+        _fail("No start URLs provided. Use --start-url/-u to specify at least one URL.",
+              rc.USAGE, as_json)
 
     asyncio.run(
         _run_crawl(
@@ -82,6 +119,8 @@ def crawl(
             max_pages=max_pages,
             max_depth=max_depth,
             model=model,
+            dry_run=dry_run,
+            as_json=as_json,
         )
     )
 
@@ -95,8 +134,12 @@ async def _run_crawl(
     max_pages: int | None,
     max_depth: int | None,
     model: str | None,
+    dry_run: bool = False,
+    as_json: bool = False,
 ) -> None:
     """Async implementation of the crawl command."""
+    import contextlib
+
     from config import load_config
     from storage.db import init_db
     from workflows.router import select_workflow
@@ -105,9 +148,77 @@ async def _run_crawl(
 
     # Fail fast with a helpful message if Ollama is unreachable
     from llm.client import check_ollama_reachable
-    if not await check_ollama_reachable(config.ollama.base_url):
-        raise typer.Exit(1)
+    reachable = await check_ollama_reachable(config.ollama.base_url)
 
+    if dry_run:
+        plan = {
+            "dry_run": True,
+            "goal": goal,
+            "start_urls": start_urls,
+            "workflow": workflow,
+            "resume": resume,
+            "max_pages": max_pages or config.crawl.max_pages,
+            "max_depth": max_depth or config.crawl.max_depth,
+            "extractor_model": model or config.ollama.extractor_model,
+            "navigator_model": config.ollama.navigator_model,
+            "ollama_base_url": config.ollama.base_url,
+            "ollama_reachable": reachable,
+            "db_path": config.storage.db_path,
+        }
+        if as_json:
+            _emit_json(plan)
+        else:
+            for k, v in plan.items():
+                console.print(f"  {k}: {v}")
+        raise typer.Exit(rc.OK if reachable else rc.DEPENDENCY)
+
+    if not reachable:
+        _fail(f"Ollama unreachable at {config.ollama.base_url}", rc.DEPENDENCY, as_json)
+
+    if as_json:
+        # Keep stdout clean for the final JSON result; progress goes to stderr.
+        with contextlib.redirect_stdout(sys.stderr):
+            await _run_crawl_inner(goal, start_urls, workflow, resume, config,
+                                   max_pages, max_depth, model, init_db, select_workflow)
+        session_id = await _find_latest_any_session(config.storage.db_path)
+        _emit_json({"session_id": session_id, "db_path": config.storage.db_path,
+                    "summary": await _session_summary(session_id)})
+        return
+    await _run_crawl_inner(goal, start_urls, workflow, resume, config,
+                           max_pages, max_depth, model, init_db, select_workflow)
+
+
+async def _find_latest_any_session(db_path: str) -> str | None:
+    from sqlalchemy import select
+    from storage.db import get_session
+    from storage.models import CrawlSession
+    async with get_session() as db:
+        result = await db.execute(
+            select(CrawlSession.id).order_by(CrawlSession.started_at.desc()).limit(1)
+        )
+        return result.scalar_one_or_none()
+
+
+async def _session_summary(session_id: str | None) -> dict | None:
+    if not session_id:
+        return None
+    from sqlalchemy import select
+    from storage.db import get_session
+    from storage.models import CrawlSession
+    async with get_session() as db:
+        s = await db.scalar(select(CrawlSession).where(CrawlSession.id == session_id))
+    if not s:
+        return None
+    return {
+        "id": s.id, "goal": s.goal, "workflow": s.workflow_used,
+        "status": s.status.value if hasattr(s.status, "value") else s.status,
+        "started_at": s.started_at, "ended_at": s.ended_at, "stats": s.stats or {},
+        "start_urls": s.start_urls or [],
+    }
+
+
+async def _run_crawl_inner(goal, start_urls, workflow, resume, config,
+                           max_pages, max_depth, model, init_db, select_workflow) -> None:
     await init_db(config.storage.db_path)
 
     console.rule("[bold green]AI Web Crawler[/bold green]")
@@ -115,10 +226,7 @@ async def _run_crawl(
     console.print(f"  Workflow: [yellow]{workflow}[/yellow]")
 
     if not start_urls:
-        console.print(
-            "[red]No start URLs provided. Use --start-url/-u to specify at least one URL.[/red]"
-        )
-        raise typer.Exit(1)
+        _fail("No start URLs provided. Use --start-url/-u to specify at least one URL.", rc.USAGE)
 
     for url in start_urls:
         console.print(f"  Seed URL: [dim]{url}[/dim]")
@@ -167,8 +275,7 @@ async def _run_crawl(
         await run_crewai(**kwargs)
 
     else:
-        console.print(f"[red]Unknown workflow: {selected_workflow}[/red]")
-        raise typer.Exit(1)
+        _fail(f"Unknown workflow: {selected_workflow}", rc.USAGE)
 
 
 async def _find_latest_session(db_path: str) -> str | None:
@@ -228,12 +335,13 @@ async def _find_latest_session(db_path: str) -> str | None:
 def list_sessions(
     config_path: Optional[Path] = typer.Option(None, "--config", "-c"),
     limit: int = typer.Option(10, "--limit", "-n", help="Number of sessions to show."),
+    as_json: bool = typer.Option(False, "--json", help="Emit JSON on stdout."),
 ) -> None:
     """List recent crawl sessions."""
-    asyncio.run(_list_sessions(config_path, limit))
+    asyncio.run(_list_sessions(config_path, limit, as_json))
 
 
-async def _list_sessions(config_path: Path | None, limit: int) -> None:
+async def _list_sessions(config_path: Path | None, limit: int, as_json: bool = False) -> None:
     from config import load_config
     from sqlalchemy import select
     from storage.db import get_session, init_db
@@ -247,6 +355,19 @@ async def _list_sessions(config_path: Path | None, limit: int) -> None:
             select(CrawlSession).order_by(CrawlSession.started_at.desc()).limit(limit)
         )
         sessions = result.scalars().all()
+
+    if as_json:
+        _emit_json([
+            {
+                "id": s.id, "goal": s.goal, "workflow": s.workflow_used,
+                "status": s.status.value if hasattr(s.status, "value") else s.status,
+                "started_at": s.started_at, "ended_at": s.ended_at,
+                "pages_crawled": (s.stats or {}).get("pages_crawled", 0),
+                "start_urls": s.start_urls or [],
+            }
+            for s in sessions
+        ])
+        return
 
     if not sessions:
         console.print("[yellow]No sessions found.[/yellow]")
@@ -278,7 +399,9 @@ async def _list_sessions(config_path: Path | None, limit: int) -> None:
 @app.command()
 def export(
     session_id: str = typer.Argument(..., help="Session ID to export."),
-    output: Path = typer.Option(Path("extracted_data.json"), "--output", "-o"),
+    output: Path = typer.Option(
+        Path("extracted_data.json"), "--output", "-o", help="Output file, or '-' for stdout."
+    ),
     fmt: str = typer.Option("json", "--format", "-f", help="Output format: json | markdown"),
     config_path: Optional[Path] = typer.Option(None, "--config", "-c"),
 ) -> None:
@@ -289,8 +412,7 @@ def export(
                        vector DBs, and LLM pipelines.
     """
     if fmt not in ("json", "markdown"):
-        console.print(f"[red]Unknown format '{fmt}'. Use 'json' or 'markdown'.[/red]")
-        raise typer.Exit(1)
+        _fail(f"Unknown format '{fmt}'. Use 'json' or 'markdown'.", rc.USAGE)
     asyncio.run(_export(session_id, output, fmt, config_path))
 
 
@@ -326,13 +448,19 @@ async def _export(session_id: str, output: Path, fmt: str, config_path: Path | N
             lines.append(page["markdown"])
             lines.append("\n\n---\n")
 
-        output.write_text("\n".join(lines), encoding="utf-8")
+        if str(output) == "-":
+            sys.stdout.write("\n".join(lines))
+        else:
+            output.write_text("\n".join(lines), encoding="utf-8")
         console.print(f"[green]Exported {len(pages)} pages as Markdown → {output}[/green]")
 
     else:
         extractions = await get_all_extractions(session_id)
-        with open(output, "w") as f:
-            json.dump(extractions, f, indent=2, default=str)
+        if str(output) == "-":
+            _emit_json(extractions)
+        else:
+            with open(output, "w") as f:
+                json.dump(extractions, f, indent=2, default=str)
         console.print(f"[green]Exported {len(extractions)} records to {output}[/green]")
 
 
@@ -369,8 +497,7 @@ async def _resume_session(
         )
 
     if not session:
-        console.print(f"[red]Session {session_id} not found.[/red]")
-        raise typer.Exit(1)
+        _fail(f"Session {session_id} not found.", rc.NOT_FOUND)
 
     console.print(f"Resuming session [cyan]{session_id}[/cyan]: {session.goal}")
 
@@ -414,6 +541,7 @@ def research(
     max_depth: Optional[int] = typer.Option(None, "--max-depth", help="Max link depth."),
     model: Optional[str] = typer.Option(None, "--model", help="Override extractor model."),
     verbose: bool = typer.Option(False, "--verbose", "-v", help="Debug logging."),
+    dry_run: bool = typer.Option(False, "--dry-run", help="Validate and print the plan; no crawl."),
 ) -> None:
     """
     Crawl academic/P2P research sources and store papers in the central DB.
@@ -427,6 +555,16 @@ def research(
     """
     if verbose:
         logging.getLogger().setLevel(logging.DEBUG)
+    if not start_url:
+        _fail("No start URLs provided. Use --start-url/-u", rc.USAGE)
+    if dry_run:
+        from config import load_config
+        cfg = load_config(config_path)
+        _emit_json({"dry_run": True, "goal": goal, "start_urls": start_url,
+                    "max_pages": max_pages or cfg.crawl.max_pages,
+                    "max_depth": max_depth or cfg.crawl.max_depth,
+                    "db_path": cfg.storage.db_path})
+        raise typer.Exit(rc.OK)
     asyncio.run(_run_research(goal, start_url, config_path, max_pages, max_depth, model))
 
 
@@ -446,13 +584,9 @@ async def _run_research(
     config = load_config(config_path)
 
     if not await check_ollama_reachable(config.ollama.base_url):
-        raise typer.Exit(1)
+        _fail(f"Ollama unreachable at {config.ollama.base_url}", rc.DEPENDENCY)
 
     await init_db(config.storage.db_path)
-
-    if not start_urls:
-        console.print("[red]No start URLs provided. Use --start-url/-u[/red]")
-        raise typer.Exit(1)
 
     console.rule("[bold green]AI Research Crawler[/bold green]")
     console.print(f"  Goal:  [cyan]{goal}[/cyan]")
@@ -478,6 +612,7 @@ def research_search(
     session: Optional[str] = typer.Option(None, "--session", "-s", help="Filter to one session."),
     limit: int = typer.Option(20, "--limit", "-n", help="Max results."),
     config_path: Optional[Path] = typer.Option(None, "--config", "-c"),
+    as_json: bool = typer.Option(False, "--json", help="Emit JSON on stdout."),
 ) -> None:
     """
     Full-text search across ALL stored research papers (cross-session).
@@ -487,7 +622,7 @@ def research_search(
       research-search '"adversarial attack" AND transformer'
       research-search 'neural*'
     """
-    asyncio.run(_research_search(query, session, limit, config_path))
+    asyncio.run(_research_search(query, session, limit, config_path, as_json))
 
 
 async def _research_search(
@@ -495,6 +630,7 @@ async def _research_search(
     session_id: str | None,
     limit: int,
     config_path: Path | None,
+    as_json: bool = False,
 ) -> None:
     from config import load_config
     from storage.db import init_db
@@ -506,6 +642,9 @@ async def _research_search(
 
     results = await search_research_papers(query, limit=limit, session_id=session_id)
 
+    if as_json:
+        _emit_json(results)
+        return
     if not results:
         console.print(f"[yellow]No papers found for: {query}[/yellow]")
         return
@@ -522,9 +661,10 @@ def research_list(
     limit: int = typer.Option(50, "--limit", "-n", help="Max results."),
     offset: int = typer.Option(0, "--offset", help="Pagination offset."),
     config_path: Optional[Path] = typer.Option(None, "--config", "-c"),
+    as_json: bool = typer.Option(False, "--json", help="Emit JSON on stdout."),
 ) -> None:
     """Browse all stored research papers (newest first)."""
-    asyncio.run(_research_list(session, year, limit, offset, config_path))
+    asyncio.run(_research_list(session, year, limit, offset, config_path, as_json))
 
 
 async def _research_list(
@@ -533,6 +673,7 @@ async def _research_list(
     limit: int,
     offset: int,
     config_path: Path | None,
+    as_json: bool = False,
 ) -> None:
     from config import load_config
     from storage.db import init_db
@@ -545,6 +686,9 @@ async def _research_list(
     stats = await get_research_stats()
     papers = await list_research_papers(session_id=session_id, year=year, limit=limit, offset=offset)
 
+    if as_json:
+        _emit_json({"stats": stats, "papers": papers})
+        return
     if not papers:
         console.print("[yellow]No research papers stored yet. Run `research` first.[/yellow]")
         return
@@ -562,12 +706,13 @@ async def _research_list(
 def research_show(
     paper_id: int = typer.Argument(..., help="Paper ID (from research-list)."),
     config_path: Optional[Path] = typer.Option(None, "--config", "-c"),
+    as_json: bool = typer.Option(False, "--json", help="Emit JSON on stdout."),
 ) -> None:
     """Show full details for one research paper."""
-    asyncio.run(_research_show(paper_id, config_path))
+    asyncio.run(_research_show(paper_id, config_path, as_json))
 
 
-async def _research_show(paper_id: int, config_path: Path | None) -> None:
+async def _research_show(paper_id: int, config_path: Path | None, as_json: bool = False) -> None:
     from rich.panel import Panel
 
     from config import load_config
@@ -580,8 +725,10 @@ async def _research_show(paper_id: int, config_path: Path | None) -> None:
 
     paper = await get_research_paper(paper_id)
     if not paper:
-        console.print(f"[red]No paper found with ID {paper_id}[/red]")
-        raise typer.Exit(1)
+        _fail(f"No paper found with ID {paper_id}", rc.NOT_FOUND, as_json)
+    if as_json:
+        _emit_json(paper)
+        return
 
     authors_str = ", ".join(paper.get("authors") or []) or "—"
     keywords_str = ", ".join(paper.get("keywords") or []) or "—"
@@ -640,6 +787,63 @@ def _print_papers_table(papers: list[dict], title: str = "Research Papers") -> N
         )
 
     console.print(table)
+
+
+# ── Doctor command ─────────────────────────────────────────────────────────────
+
+@app.command()
+def doctor(
+    config_path: Optional[Path] = typer.Option(None, "--config", "-c"),
+    as_json: bool = typer.Option(False, "--json", help="Emit JSON on stdout."),
+) -> None:
+    """Check readiness: Python deps, Ollama + configured models, DB paths.
+
+    Exit 0 if the radar crawler is usable; the `llm_crawl_ready` field says
+    whether LLM commands (crawl/research) can run. Exit 3 if core deps are missing.
+    """
+    import importlib.util
+
+    from config import load_config
+    from radar.db import DEFAULT_DB_PATH
+
+    cfg = load_config(config_path)
+    core = ["aiohttp", "bs4", "trafilatura", "pydantic", "yaml", "sqlalchemy", "aiosqlite",
+            "typer", "rich", "ollama", "tiktoken"]
+    optional = ["playwright", "crawl4ai", "langgraph", "crewai", "fastapi", "uvicorn"]
+    deps = {m: importlib.util.find_spec(m) is not None for m in core}
+    opt = {m: importlib.util.find_spec(m) is not None for m in optional}
+
+    async def _ollama() -> tuple[bool, list[str]]:
+        import aiohttp
+        try:
+            async with aiohttp.ClientSession() as s:
+                async with s.get(f"{cfg.ollama.base_url.rstrip('/')}/api/tags",
+                                 timeout=aiohttp.ClientTimeout(total=5)) as r:
+                    data = await r.json()
+                    return r.status == 200, [m["name"] for m in data.get("models", [])]
+        except Exception:
+            return False, []
+
+    reachable, models = asyncio.run(_ollama())
+    wanted = {cfg.ollama.navigator_model, cfg.ollama.extractor_model, cfg.ollama.router_model}
+    missing_models = sorted(m for m in wanted if m not in models)
+    report = {
+        "python": sys.version.split()[0],
+        "core_deps": deps,
+        "optional_deps": opt,
+        "ollama": {"base_url": cfg.ollama.base_url, "reachable": reachable,
+                   "installed_models": models, "missing_models": missing_models},
+        "llm_db_path": cfg.storage.db_path,
+        "radar_db_path": DEFAULT_DB_PATH,
+        "radar_ready": all(deps.values()),
+        "llm_crawl_ready": all(deps.values()) and reachable and not missing_models,
+    }
+    if as_json:
+        _emit_json(report)
+    else:
+        for k, v in report.items():
+            console.print(f"  [bold]{k}[/bold]: {v}")
+    raise typer.Exit(rc.OK if report["radar_ready"] else rc.DEPENDENCY)
 
 
 # ── Web dashboard command ──────────────────────────────────────────────────────

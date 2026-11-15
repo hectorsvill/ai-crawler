@@ -76,10 +76,12 @@ def html_to_markdown(html: str, url: str = "") -> str:
             # Re-inject it from the <h1> tag if it's absent from the result.
             soup = BeautifulSoup(html, "html.parser")
             h1 = soup.find("h1")
-            if h1:
-                h1_text = h1.get_text(strip=True)
-                if h1_text and h1_text not in result[:200]:
-                    result = f"# {h1_text}\n\n{result}"
+            heading = h1.get_text(strip=True) if h1 else None
+            if not heading and soup.title:
+                # No <h1>: fall back to <title> so the page keeps a heading.
+                heading = soup.title.get_text(strip=True)
+            if heading and heading not in result[:200]:
+                result = f"# {heading}\n\n{result}"
             return result
 
     # BeautifulSoup fallback
@@ -342,10 +344,7 @@ class CrawlEngine:
         user_agent: str | None = None,
     ) -> None:
         # Accept a CrawlConfig object, a plain user-agent string, or user_agent= kwarg
-        _default_ua = (
-            "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
-            "(KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
-        )
+        _default_ua = "ai-crawler/1.0 (+https://github.com/hectorsvill/ai-crawler)"
         if config_or_user_agent is not None and hasattr(config_or_user_agent, "user_agents"):
             cfg = config_or_user_agent
             import random
