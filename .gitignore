@@ -25,6 +25,7 @@ htmlcov/
 .mypy_cache/
 
 # Runtime data
+data/
 crawl_data.db
 *.db
 *.db-shm

@@ -1,0 +1,36 @@
+# Radar seeds: official/primary sources first, then reputable outlets.
+# kind: feed (RSS/Atom) | html (index page; article links are followed)
+# topics: always applied to pages from this seed (leave [] for general outlets)
+# require_match: true => feed items must match a topic keyword before fetching
+seeds:
+  # ── Frontier labs ────────────────────────────────────────────────
+  - {url: "https://openai.com/news/rss.xml", kind: feed, topics: [frontier-labs], max_items: 10}
+  - {url: "https://www.anthropic.com/news", kind: html, topics: [frontier-labs], max_items: 8}
+  - {url: "https://safeguards.anthropic.com/", kind: html, topics: [frontier-labs, ai-security], max_items: 6}
+  - {url: "https://blog.google/technology/ai/rss/", kind: feed, topics: [frontier-labs], max_items: 8}
+  - {url: "https://deepmind.google/blog/rss.xml", kind: feed, topics: [frontier-labs], max_items: 6}
+  - {url: "https://ai.meta.com/blog/", kind: html, topics: [frontier-labs], max_items: 5}
+  - {url: "https://mistral.ai/news", kind: html, topics: [frontier-labs], max_items: 5}
+  - {url: "https://x.ai/news", kind: html, topics: [frontier-labs], max_items: 5}
+  # ── Open weights / agents / coding ──────────────────────────────
+  - {url: "https://huggingface.co/blog/feed.xml", kind: feed, topics: [open-weights], max_items: 8}
+  - {url: "https://simonwillison.net/atom/everything/", kind: feed, topics: [], require_match: true, max_items: 8}
+  - {url: "https://techcrunch.com/category/artificial-intelligence/feed/", kind: feed, topics: [], require_match: true, max_items: 10}
+  # ── Chips / export controls ─────────────────────────────────────
+  - {url: "https://nvidianews.nvidia.com/releases.xml", kind: feed, topics: [chips-export-controls], max_items: 6}
+  - {url: "https://www.bis.gov/news-updates", kind: html, topics: [chips-export-controls], max_items: 6}
+  - {url: "https://unemploymentlabs.com/checkpoint-forensics", kind: html, topics: [chips-export-controls, open-weights], max_items: 3}
+  # ── AI security ─────────────────────────────────────────────────
+  - {url: "https://www.securityweek.com/feed/", kind: feed, topics: [], require_match: true, max_items: 10}
+  - {url: "https://www.theregister.com/headlines.atom", kind: feed, topics: [], require_match: true, max_items: 10}
+  - {url: "https://www.aikido.dev/blog", kind: html, topics: [ai-security], max_items: 5}
+  - {url: "https://www.bleepingcomputer.com/feed/", kind: feed, topics: [], require_match: true, max_items: 8}
+  - {url: "https://thehackernews.com/feeds/posts/default", kind: feed, topics: [], require_match: true, max_items: 8}
+  # ── War / SHTF ──────────────────────────────────────────────────
+  - {url: "https://understandingwar.org/", kind: html, topics: [], max_items: 6}
+  - {url: "https://kyivindependent.com/news-archive/rss/", kind: feed, topics: [war-ukraine-russia], max_items: 10}
+  - {url: "http://en.kremlin.ru/events/president/news/feed", kind: feed, topics: [war-ukraine-russia], require_match: true, max_items: 6}
+  - {url: "https://www.aljazeera.com/xml/rss/all.xml", kind: feed, topics: [], require_match: true, max_items: 12}
+  - {url: "https://feeds.bbci.co.uk/news/world/rss.xml", kind: feed, topics: [], require_match: true, max_items: 12}
+  - {url: "https://news.usni.org/feed", kind: feed, topics: [], require_match: true, max_items: 6}
+  - {url: "https://www.defensenews.com/arc/outboundfeeds/rss/", kind: feed, topics: [], require_match: true, max_items: 6}

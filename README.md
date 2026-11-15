@@ -1,5 +1,7 @@
 # AI Web Crawler
 
+> **AI agents:** read [`AGENTS.md`](AGENTS.md). Every command is non-interactive; data commands support `--json`; exit codes are documented. `main.py radar ...` is a no-LLM topic crawler with its own SQLite DB (`data/crawler.db`).
+
 A production-ready, modular intelligent web crawler powered by local LLMs via [Ollama](https://ollama.ai).
 
 Built for AMD GPU (ROCm) workstations running Ollama at `http://localhost:11434`.

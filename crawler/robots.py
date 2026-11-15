@@ -20,7 +20,7 @@ logger = logging.getLogger(__name__)
 ROBOTS_CACHE_TTL = 3600
 
 # User-agent string used when fetching robots.txt
-ROBOTS_FETCH_UA = "AICrawlerBot/1.0 (+https://github.com/ai-crawler)"
+ROBOTS_FETCH_UA = "ai-crawler/1.0 (+https://github.com/hectorsvill/ai-crawler)"
 
 
 class RobotsCache:
