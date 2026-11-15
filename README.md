@@ -328,30 +328,67 @@ export CRAWLER_STORAGE__DB_PATH="/data/crawl.db"
 
 ## Radar crawler (no LLM)
 
-`main.py radar` stores pages in `data/crawler.db` and writes **every URL a run encounters**
-to `run_urls` (skips, failures, and links that were never fetched, not only stored pages).
-Politeness is unchanged. `radar crawl --dry-run` prints the plan, including `url_log`, and
-does not open the database.
+`main.py radar` stores pages in `data/crawler.db` (gitignored) and writes **every URL a run encounters** to `run_urls`: seeds, fetches, skips, failures, and candidates that were never requested. `pages` and its FTS5 index stay as they are. `radar crawl --dry-run` prints the plan, including `url_log` (`table`, `key`, `statuses`, `seed_urls`), and does not open the database. A live `radar crawl --json` result adds `urls_logged` (the number of `run_urls` rows for that run).
+
+robots.txt is still checked for the real User-Agent (RFC 9309: 4xx means allowed, 5xx or unreachable means disallowed). Record groups split only on `User-agent` lines. Blank lines and comment-only lines are removed before parsing, so a `Crawl-delay` or `Disallow` that follows a blank line in the same group still applies. A `Crawl-delay` above 30 seconds still means one request to that domain per run.
+
+### `radar urls`
 
 ```bash
 python main.py radar urls --run 3 --json
 python main.py radar urls --run 3 --status skipped --json
 python main.py radar urls --status not_fetched --domain example.com --json
+python main.py radar urls --run 3 --counts --json
 ```
 
-`--json` prints one array. An unknown `--status` exits 2. A `--run` id that does not exist
-exits 4. An empty match exits 0 with `[]`.
+Without `--counts`, `--json` is one array, oldest discovery first. Filters: `--run`, `--status`, `--domain` (exact host or a subdomain), `--limit` (default 100), `--offset`.
 
-`run_urls` is keyed by `(run_id, url)`:
+| Exit | When |
+|------|------|
+| 0 | success, including no rows (`[]`) |
+| 2 | unknown `--status`, or `--counts` without `--run` |
+| 4 | `--run` is not in `runs` |
 
+Each row is `{id, run_id, url, domain, source_seed, discovered_from, depth, status, reason, http_status, discovered_at, fetched_at}`. `discovered_from` is null for the seed. `fetched_at` is set only when a request was sent (including HTTP errors and transport failures). Page URLs are normalized the same way as `pages.url`. The same URL in a later run is a new row (`UNIQUE(run_id, url)`).
+
+`--counts` needs `--run`. `--json` is one object: `{run_id, total, by_status, by_reason[{status, reason, count}], reconciliation, ok}`. `reconciliation` compares the run row with the log. Each counter is `{run, url_log, match}`:
+
+| Run counter | Counted in the URL log as |
+|-------------|---------------------------|
+| `pages_fetched` | rows with `http_status` set |
+| `pages_stored` | `stored` + `duplicate` + `feed_only` |
+| `pages_failed` | `failed`, plus `feed_only` whose reason is `HTTP ...` |
+| `pages_skipped` | `skipped`, plus `feed_only` whose reason is `crawl-delay ...` |
+
+`ok` is true when every `match` is true. `ok: false` means a URL was requested twice in one run (counted twice on the run, one row in the log).
+
+### Statuses and reasons
+
+| status | meaning |
+|--------|---------|
+| `stored` | `pages` row written with a body |
+| `feed_only` | `pages` row written from feed metadata, no body |
+| `failed` | request failed and no `pages` row was written |
+| `skipped` | robots.txt disallow, long Crawl-delay with nothing to store, or non-HTML content-type |
+| `not_fetched` | seen and never requested |
+| `duplicate` | `pages` row written, text omitted (same content hash under another URL) |
+| `fetched` | seed feed document retrieved and parsed, not stored as a page |
+
+`not_fetched` reasons: `budget` (page cap), `max_items` (per-seed cap), `depth`, `link_cap` (per-page follow cap), `require_match`, `recent_days`, `no_title` (a `feed_only` seed whose entry has no title).
+
+A fetch failure or long Crawl-delay that still saves feed metadata stays `feed_only`. `reason` and `http_status` keep the cause (`HTTP 403`, `crawl-delay 100s`), and `runs.errors` still lists fetch failures. Links rejected by `is_article_link` (nav, other sites, assets) are not logged. The robots.txt URL itself is not logged.
+
+### Schema v2
+
+`run_urls(id, run_id, url, domain, source_seed, discovered_from, depth, status, reason, http_status, discovered_at, fetched_at)` with `UNIQUE(run_id, url)`.
+
+The first time an older `data/crawler.db` is opened, schema version 2 (`PRAGMA user_version`) adds `run_urls` and any missing columns. Existing `pages` rows are not rewritten. Opening the file again is a no-op. Copy the database before that first open:
+
+```bash
+cp data/crawler.db data/crawler.db.bak
 ```
-run_urls(id, run_id, url, domain, source_seed, discovered_from, depth, status, reason,
-         http_status, discovered_at, fetched_at)
-```
 
-`status` is one of `stored`, `feed_only`, `failed`, `skipped`, `not_fetched`, `duplicate`,
-`fetched`. Opening an existing radar DB adds this table without changing `pages` or its
-full-text index. See `AGENTS.md` for the reason codes and a field-by-field contract.
+The command contract is in [`AGENTS.md`](AGENTS.md).
 
 ## 11. Running the Test Suite
 
@@ -386,6 +423,7 @@ Test coverage includes:
 
 | Area | Change |
 |------|--------|
+| **Radar URL log** | Every URL a radar run encounters is stored in `run_urls` and listed with `radar urls` (filters and `--counts`). Schema v2 adds that table on open. robots.txt blank lines no longer drop a later `Crawl-delay` or `Disallow` in the same group. |
 | **URL normalization** | All URLs are canonicalized before queuing (lowercase, strip fragments/default ports/trailing slashes, sort query params) preventing duplicate crawls of semantically identical URLs |
 | **Score clamping** | LLM-returned scores outside [0, 1] are clamped rather than rejected, preventing crawl interruption from out-of-range model output |
 | **Action validation** | `NavigatorDecision.action` values not in `{deepen, backtrack, complete}` safely default to `deepen` |
