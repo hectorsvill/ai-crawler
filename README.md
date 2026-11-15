@@ -326,6 +326,33 @@ export CRAWLER_STORAGE__DB_PATH="/data/crawl.db"
 
 ---
 
+## Radar crawler (no LLM)
+
+`main.py radar` stores pages in `data/crawler.db` and writes **every URL a run encounters**
+to `run_urls` (skips, failures, and links that were never fetched, not only stored pages).
+Politeness is unchanged. `radar crawl --dry-run` prints the plan, including `url_log`, and
+does not open the database.
+
+```bash
+python main.py radar urls --run 3 --json
+python main.py radar urls --run 3 --status skipped --json
+python main.py radar urls --status not_fetched --domain example.com --json
+```
+
+`--json` prints one array. An unknown `--status` exits 2. A `--run` id that does not exist
+exits 4. An empty match exits 0 with `[]`.
+
+`run_urls` is keyed by `(run_id, url)`:
+
+```
+run_urls(id, run_id, url, domain, source_seed, discovered_from, depth, status, reason,
+         http_status, discovered_at, fetched_at)
+```
+
+`status` is one of `stored`, `feed_only`, `failed`, `skipped`, `not_fetched`, `duplicate`,
+`fetched`. Opening an existing radar DB adds this table without changing `pages` or its
+full-text index. See `AGENTS.md` for the reason codes and a field-by-field contract.
+
 ## 11. Running the Test Suite
 
 Tests require no Ollama instance or network connection — they cover all pure-Python logic.

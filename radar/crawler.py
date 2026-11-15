@@ -8,6 +8,8 @@ Pipeline per run:
   3. Fetch candidates breadth-first up to --max-depth / --max-pages, extract
      title, canonical URL, published date, and Markdown text, tag by topic, and
      upsert into the radar DB.
+  4. Write every encountered URL (seed, fetch, skip, failure, unfetched
+     candidate) to ``run_urls``, keyed by run id + URL. ``pages`` is unchanged.
 
 Politeness: honest User-Agent, robots.txt (RFC 9309: 5xx/unreachable => disallow),
 Crawl-delay honoured, per-domain minimum delay, small global concurrency,
@@ -30,7 +32,7 @@ from urllib.robotparser import RobotFileParser
 
 import yaml
 
-from radar.db import RadarDB, utcnow
+from radar.db import URL_STATUSES, RadarDB, utcnow
 from radar.extract import (
     content_hash, domain_of, extract_metadata, is_article_link, normalize_url, parse_feed,
 )
@@ -161,6 +163,17 @@ def plan(seeds: list[Seed], params: CrawlParams, db_path: str) -> dict[str, Any]
         "max_possible_fetches": min(
             params.max_pages, len(seeds) + sum(s.max_items for s in seeds) * max(params.max_depth, 1)
         ),
+        # A live run writes one row per URL it encounters. Dry-run does not open the DB.
+        "url_log": {
+            "table": "run_urls",
+            "key": ["run_id", "url"],
+            "statuses": list(URL_STATUSES),
+            "seed_urls": [s.url for s in seeds],
+            "note": (
+                "Every seed, fetch, skip, failure, and discovered URL that is not "
+                "fetched is inserted into run_urls. Query with `radar urls`."
+            ),
+        },
     }
 
 
@@ -198,22 +211,54 @@ class RadarCrawler:
             charset = resp.charset or "utf-8"
             return resp.status, ctype, body.decode(charset, errors="replace")
 
+    def _log(self, run_id: int, url: str, *, status: str, seed: Seed, depth: int,
+             discovered_from: str | None = None, reason: str | None = None,
+             http_status: int | None = None, fetched: bool = False,
+             overwrite: bool = True) -> None:
+        """Append or upgrade one ``run_urls`` row. Does not touch politeness state."""
+        if not url:
+            return
+        now = utcnow()
+        self.db.log_url({
+            "run_id": run_id, "url": url, "domain": domain_of(url),
+            "source_seed": seed.url, "discovered_from": discovered_from, "depth": depth,
+            "status": status, "reason": reason, "http_status": http_status,
+            "discovered_at": now, "fetched_at": now if fetched else None,
+        }, overwrite=overwrite)
+
+    def _log_stored(self, run_id: int, url: str, action: str, seed: Seed, depth: int,
+                    discovered_from: str | None, http_status: int | None) -> None:
+        duplicate = action == "duplicate_content"
+        self._log(
+            run_id, url, status="duplicate" if duplicate else "stored",
+            reason="duplicate_content" if duplicate else None, seed=seed, depth=depth,
+            discovered_from=discovered_from, http_status=http_status, fetched=True,
+        )
+
     async def _fetch(self, session: Any, robots: RobotsPolicy, throttle: DomainThrottle,
-                     url: str) -> tuple[int, str, str] | None:
+                     url: str, run_id: int, seed: Seed, depth: int,
+                     discovered_from: str | None) -> tuple[int, str, str] | None:
         if self._budget <= 0:
+            self._log(run_id, url, status="not_fetched", reason="budget", seed=seed,
+                      depth=depth, discovered_from=discovered_from, overwrite=False)
             return None
         allowed, crawl_delay = await robots.check(url)
         if not allowed:
             self.counters["skipped"] += 1
             self.skips.append({"url": url, "reason": "robots.txt"})
+            self._log(run_id, url, status="skipped", reason="robots.txt", seed=seed,
+                      depth=depth, discovered_from=discovered_from)
             return None
         if crawl_delay and crawl_delay > self.p.max_crawl_delay and \
                 domain_of(url) in self._touched:
             # Honour a very long Crawl-delay by not making a 2nd request this run
             # (instead of blocking a concurrency slot for minutes).
+            reason = f"crawl-delay {crawl_delay:g}s"
             self.counters["skipped"] += 1
-            self.skips.append({"url": url, "reason": f"crawl-delay {crawl_delay:g}s"})
+            self.skips.append({"url": url, "reason": reason})
             self._delay_skipped.add(url)
+            self._log(run_id, url, status="skipped", reason=reason, seed=seed,
+                      depth=depth, discovered_from=discovered_from)
             return None
         self._touched.add(domain_of(url))
         self._budget -= 1
@@ -222,7 +267,10 @@ class RadarCrawler:
             status, ctype, text = await self._get(session, url)
         except Exception as exc:
             self.counters["failed"] += 1
-            self.errors.append({"url": url, "error": f"{type(exc).__name__}: {exc}"[:300]})
+            msg = f"{type(exc).__name__}: {exc}"[:300]
+            self.errors.append({"url": url, "error": msg})
+            self._log(run_id, url, status="failed", reason=msg, seed=seed, depth=depth,
+                      discovered_from=discovered_from, fetched=True)
             return None
         self.counters["fetched"] += 1
         self.domains.add(domain_of(url))
@@ -230,11 +278,14 @@ class RadarCrawler:
             self._http_fail[url] = status
             self.counters["failed"] += 1
             self.errors.append({"url": url, "error": f"HTTP {status}"})
+            self._log(run_id, url, status="failed", reason=f"HTTP {status}", seed=seed,
+                      depth=depth, discovered_from=discovered_from, http_status=status,
+                      fetched=True)
             return None
         return status, ctype, text
 
     def _store(self, url: str, status: int, html: str, seed: Seed, hint: dict, run_id: int
-               ) -> dict:
+               ) -> tuple[dict, str]:
         meta = extract_metadata(html, url)
         title = meta["title"] or hint.get("title")
         desc = meta["description"] or hint.get("description")
@@ -250,9 +301,10 @@ class RadarCrawler:
         _, action = self.db.upsert_page(page, sorted(tags), run_id)
         self.counters["stored"] += 1
         self.counters[action] += 1
-        return meta
+        return meta, action
 
-    def _store_feed_only(self, url: str, status: int | None, seed: Seed, hint: dict, run_id: int) -> None:
+    def _store_feed_only(self, url: str, status: int | None, seed: Seed, hint: dict, run_id: int,
+                         *, reason: str, depth: int, discovered_from: str | None) -> None:
         """Store a feed entry without its article body: the article refused us (e.g. 403),
         robots Crawl-delay is too long for a 2nd request, or the seed is ``feed_only``.
         Keeps title/date/summary so the item is still queryable."""
@@ -268,6 +320,9 @@ class RadarCrawler:
         self.counters["feed_only"] += 1
         self.counters["stored"] += 1
         self.counters[action] += 1
+        self._log(run_id, url, status="feed_only", reason=reason, seed=seed, depth=depth,
+                  discovered_from=discovered_from, http_status=status,
+                  fetched=status is not None)
 
     def _recent(self, iso: str | None) -> bool:
         if self.p.recent_days is None or not iso:
@@ -280,53 +335,122 @@ class RadarCrawler:
             dt = dt.replace(tzinfo=timezone.utc)
         return dt >= datetime.now(timezone.utc) - timedelta(days=self.p.recent_days)
 
+    def _log_unfetched(self, run_id: int, items: list[tuple[str, dict]], seed: Seed,
+                       discovered_from: str, reason: str, depth: int = 1) -> None:
+        for url, _hint in items:
+            self._log(run_id, url, status="not_fetched", reason=reason, seed=seed,
+                      depth=depth, discovered_from=discovered_from, overwrite=False)
+
+    def _follow_links(self, frontier: list[tuple[str, dict, int, str]], links: list[str],
+                      page_url: str, depth: int, seed: Seed, run_id: int) -> None:
+        """Enqueue the same slice the crawler always followed, and log the rest.
+
+        Links rejected by ``is_article_link`` (nav, other sites, assets) are not
+        candidates and are not written to the log.
+        """
+        queued = {item[0] for item in frontier}
+        more = [link for link in links if is_article_link(link, page_url) and link not in self._seen]
+        if depth < self.p.max_depth:
+            cap = max(2, seed.max_items // 3)
+            frontier.extend((link, {}, depth + 1, page_url) for link in more[:cap])
+            for link in more[cap:]:
+                if link not in queued:
+                    self._log(run_id, link, status="not_fetched", reason="link_cap", seed=seed,
+                              depth=depth + 1, discovered_from=page_url, overwrite=False)
+            return
+        for link in more:
+            if link not in queued:
+                self._log(run_id, link, status="not_fetched", reason="depth", seed=seed,
+                          depth=depth + 1, discovered_from=page_url, overwrite=False)
+
     async def _crawl_seed(self, session: Any, robots: RobotsPolicy, throttle: DomainThrottle,
                           seed: Seed, run_id: int, sem: asyncio.Semaphore) -> None:
         async with sem:
-            res = await self._fetch(session, robots, throttle, seed.url)
+            res = await self._fetch(session, robots, throttle, seed.url, run_id, seed,
+                                    depth=0, discovered_from=None)
         if not res:
             return
         status, ctype, text = res
         candidates: list[tuple[str, dict]] = []
-        if seed.kind == "feed" or "xml" in ctype and "html" not in ctype:
+        if seed.kind == "feed" or ("xml" in ctype and "html" not in ctype):
+            self._log(run_id, seed.url, status="fetched", reason="feed", seed=seed, depth=0,
+                      http_status=status, fetched=True)
             for it in parse_feed(text, seed.url):
                 if not self._recent(it["published_at"]):
+                    self._log(run_id, it["url"], status="not_fetched", reason="recent_days",
+                              seed=seed, depth=1, discovered_from=seed.url, overwrite=False)
                     continue
                 if seed.require_match and not tag_text(it["title"], it["description"], body_min_hits=1):
+                    self._log(run_id, it["url"], status="not_fetched", reason="require_match",
+                              seed=seed, depth=1, discovered_from=seed.url, overwrite=False)
                     continue
                 candidates.append((it["url"], it))
+            discovered_from = seed.url
         else:
-            meta = self._store(normalize_url(seed.url), status, text, seed, {}, run_id)
-            candidates = [(l, {}) for l in meta["links"] if is_article_link(l, seed.url)]
+            page_url = normalize_url(seed.url)
+            meta, action = self._store(page_url, status, text, seed, {}, run_id)
+            self._log_stored(run_id, page_url, action, seed, depth=0, discovered_from=None,
+                             http_status=status)
+            candidates = [(link, {}) for link in meta["links"] if is_article_link(link, seed.url)]
+            discovered_from = page_url
+
+        chosen = candidates[: seed.max_items]
+        self._log_unfetched(run_id, candidates[seed.max_items:], seed, discovered_from, "max_items")
 
         if seed.feed_only:
-            for u, h in candidates[: seed.max_items]:
-                if u not in self._seen and h.get("title"):
-                    self._seen.add(u)
-                    self._store_feed_only(u, None, seed, h, run_id)
+            for url, hint in chosen:
+                if url in self._seen:
+                    continue
+                if not hint.get("title"):
+                    self._log(run_id, url, status="not_fetched", reason="no_title", seed=seed,
+                              depth=1, discovered_from=discovered_from, overwrite=False)
+                    continue
+                self._seen.add(url)
+                self._store_feed_only(url, None, seed, hint, run_id, reason="feed_only",
+                                      depth=1, discovered_from=discovered_from)
             return
 
-        frontier = [(u, h, 1) for u, h in candidates[: seed.max_items]]
+        frontier: list[tuple[str, dict, int, str]] = [
+            (url, hint, 1, discovered_from) for url, hint in chosen
+        ]
         while frontier and self._budget > 0:
-            url, hint, depth = frontier.pop(0)
+            url, hint, depth, parent = frontier.pop(0)
             if url in self._seen:
                 continue
             self._seen.add(url)
             async with sem:
-                res = await self._fetch(session, robots, throttle, url)
+                res = await self._fetch(session, robots, throttle, url, run_id, seed,
+                                        depth=depth, discovered_from=parent)
             if not res:
                 if hint.get("title") and (url in self._http_fail or url in self._delay_skipped):
-                    self._store_feed_only(url, self._http_fail.get(url), seed, hint, run_id)
+                    if url in self._http_fail:
+                        reason = f"HTTP {self._http_fail[url]}"
+                    else:
+                        reason = next(
+                            (s["reason"] for s in reversed(self.skips) if s["url"] == url),
+                            "crawl-delay",
+                        )
+                    self._store_feed_only(
+                        url, self._http_fail.get(url), seed, hint, run_id,
+                        reason=reason, depth=depth, discovered_from=parent,
+                    )
                 continue
             status, ctype, html = res
             if "html" not in ctype and "xml" not in ctype and "text" not in ctype:
                 self.counters["skipped"] += 1
-                self.skips.append({"url": url, "reason": f"content-type {ctype}"})
+                reason = f"content-type {ctype}"
+                self.skips.append({"url": url, "reason": reason})
+                self._log(run_id, url, status="skipped", reason=reason, seed=seed, depth=depth,
+                          discovered_from=parent, http_status=status, fetched=True)
                 continue
-            meta = self._store(url, status, html, seed, hint, run_id)
-            if depth < self.p.max_depth:
-                more = [l for l in meta["links"] if is_article_link(l, url) and l not in self._seen]
-                frontier.extend((l, {}, depth + 1) for l in more[: max(2, seed.max_items // 3)])
+            meta, action = self._store(url, status, html, seed, hint, run_id)
+            self._log_stored(run_id, url, action, seed, depth=depth, discovered_from=parent,
+                             http_status=status)
+            self._follow_links(frontier, meta["links"], url, depth, seed, run_id)
+
+        for url, _hint, depth, parent in frontier:
+            self._log(run_id, url, status="not_fetched", reason="budget", seed=seed,
+                      depth=depth, discovered_from=parent, overwrite=False)
 
     async def run(self, seeds: list[Seed], run_params: dict) -> dict[str, Any]:
         import aiohttp
@@ -351,4 +475,5 @@ class RadarCrawler:
             "elapsed_s": round(time.monotonic() - started, 1),
             "counters": self.counters, "domains": sorted(self.domains),
             "errors": self.errors, "skips": self.skips,
+            "urls_logged": self.db.count_urls(run_id),
         }

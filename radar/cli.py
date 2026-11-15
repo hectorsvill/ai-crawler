@@ -93,6 +93,8 @@ def crawl_cmd(
         emit(p, as_json, human=(
             f"DRY RUN: {len(p['seeds'])} seeds across {len(p['domains'])} domains, "
             f"<= {p['max_possible_fetches']} fetches, db={db_path}\n"
+            f"url log: {p['url_log']['table']} "
+            f"(one row per URL encountered; no writes on dry-run)\n"
             + "\n".join(f"  [{s['kind']}] {s['url']}  topics={s['topics']}" for s in p["seeds"])))
         raise typer.Exit(rc.OK)
 
@@ -135,6 +137,40 @@ def pages_cmd(
     emit(rows, as_json, human="\n".join(
         f"{r['id']:>5}  {(r['published_at'] or '-')[:10]}  {r['domain']:<22.22}  "
         f"{(r['title'] or r['url'])[:80]}  [{','.join(r['tags'])}]" for r in rows) or "(no pages)")
+
+
+@radar_app.command("urls")
+def urls_cmd(
+    run_id: Optional[int] = typer.Option(None, "--run", help="Only URLs from this run id."),
+    status: Optional[str] = typer.Option(
+        None, "--status", "-s",
+        help="stored | feed_only | failed | skipped | not_fetched | duplicate | fetched.",
+    ),
+    domain: Optional[str] = typer.Option(None, "--domain", "-d"),
+    limit: int = typer.Option(100, "--limit", "-n", min=1),
+    offset: int = typer.Option(0, "--offset", min=0),
+    db: Optional[str] = DBOpt,
+    as_json: bool = JsonOpt,
+) -> None:
+    """List every URL a run encountered (not only stored pages)."""
+    from radar.db import URL_STATUSES
+
+    if status is not None and status not in URL_STATUSES:
+        fail(
+            f"unknown status {status!r}. Expected: {', '.join(URL_STATUSES)}",
+            rc.USAGE, as_json,
+        )
+    with _db(db) as store:
+        if run_id is not None and store.get_run(run_id) is None:
+            fail(f"run {run_id} not found", rc.NOT_FOUND, as_json)
+        try:
+            rows = store.query_urls(run_id, status, domain, limit, offset)
+        except ValueError as exc:
+            fail(str(exc), rc.USAGE, as_json)
+    emit(rows, as_json, human="\n".join(
+        f"{r['run_id']:>4}  {r['status']:<12} d={r['depth']}  {r['domain']:<24.24}  {r['url']}"
+        + (f"  ({r['reason']})" if r["reason"] else "")
+        for r in rows) or "(no urls)")
 
 
 @radar_app.command("show")
@@ -213,7 +249,7 @@ def stats_cmd(db: Optional[str] = DBOpt, as_json: bool = JsonOpt) -> None:
         s = store.stats()
     emit(s, as_json, human=(
         f"db={s['db_path']} pages={s['pages']} (dated {s['pages_with_published_at']}) "
-        f"domains={s['domains']} runs={s['runs']}\n"
+        f"domains={s['domains']} runs={s['runs']} url_log={s['url_log']}\n"
         + "\n".join(f"  {t['tag']:<24} {t['pages']}" for t in s["tags"])))
 
 

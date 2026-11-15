@@ -19,7 +19,7 @@ def _json(result):
 def test_radar_help_lists_commands():
     r = runner.invoke(app, ["radar", "--help"])
     assert r.exit_code == 0
-    for cmd in ("crawl", "pages", "show", "export", "runs", "stats", "topics"):
+    for cmd in ("crawl", "pages", "urls", "show", "export", "runs", "stats", "topics"):
         assert cmd in r.stdout
 
 
@@ -31,6 +31,8 @@ def test_radar_crawl_dry_run_json(tmp_path):
     plan = _json(r)
     assert plan["dry_run"] is True and plan["limits"]["max_pages"] == 50
     assert plan["seeds"] and not db.exists()  # dry run never creates the DB
+    assert plan["url_log"]["table"] == "run_urls"
+    assert plan["url_log"]["seed_urls"]
 
 
 def test_radar_crawl_missing_seeds_file(tmp_path):
@@ -48,7 +50,7 @@ def test_radar_crawl_bad_kind():
 
 def test_radar_query_commands_on_empty_db(tmp_path):
     db = str(tmp_path / "r.db")
-    for args in (["pages"], ["runs"], ["stats"], ["topics"]):
+    for args in (["pages"], ["runs"], ["stats"], ["topics"], ["urls"]):
         r = runner.invoke(app, ["radar", *args, "--json"] + (["--db", db] if args != ["topics"] else []))
         assert r.exit_code == 0, (args, r.output)
         _json(r)  # valid JSON
@@ -72,6 +74,50 @@ def test_radar_pages_and_export_with_data(tmp_path):
     assert r.exit_code == 0 and json.loads(out.read_text())[0]["text_md"] == "anthropic red team"
     r = runner.invoke(app, ["radar", "pages", "--db", db, "--q", "\"unclosed", "--json"])
     assert r.exit_code == rc.USAGE
+
+
+def test_radar_urls_json_filters_and_exit_codes(tmp_path):
+    from radar.db import RadarDB
+    db = str(tmp_path / "r.db")
+    with RadarDB(db) as store:
+        run = store.start_run({"seeds": ["https://a.com/rss"]})
+        store.log_url({
+            "run_id": run, "url": "https://a.com/ok", "domain": "a.com", "depth": 0,
+            "source_seed": "https://a.com/rss", "status": "stored",
+            "http_status": 200, "fetched_at": "2026-11-15T00:00:01+00:00",
+        })
+        store.log_url({
+            "run_id": run, "url": "https://news.a.com/hidden", "domain": "news.a.com",
+            "depth": 1, "source_seed": "https://a.com/rss", "discovered_from": "https://a.com/rss",
+            "status": "skipped", "reason": "robots.txt",
+        })
+        other = store.start_run({})
+        store.log_url({
+            "run_id": other, "url": "https://b.com/nope", "domain": "b.com",
+            "status": "failed", "reason": "HTTP 500", "http_status": 500,
+        })
+
+    r = runner.invoke(app, ["radar", "urls", "--db", db, "--json", "--run", str(run),
+                            "--status", "skipped"])
+    assert r.exit_code == rc.OK, r.output
+    rows = _json(r)
+    assert len(rows) == 1
+    assert rows[0]["url"] == "https://news.a.com/hidden"
+    assert rows[0]["status"] == "skipped" and rows[0]["reason"] == "robots.txt"
+    assert rows[0]["fetched_at"] is None and rows[0]["depth"] == 1
+
+    r = runner.invoke(app, ["radar", "urls", "--db", db, "--json", "--domain", "a.com",
+                            "--status", "stored"])
+    assert r.exit_code == 0
+    assert [row["url"] for row in _json(r)] == ["https://a.com/ok"]
+
+    r = runner.invoke(app, ["radar", "urls", "--db", db, "--json", "--status", "nope"])
+    assert r.exit_code == rc.USAGE
+    assert _json(r)["exit_code"] == rc.USAGE
+
+    r = runner.invoke(app, ["radar", "urls", "--db", db, "--json", "--run", "999"])
+    assert r.exit_code == rc.NOT_FOUND
+    assert _json(r)["exit_code"] == rc.NOT_FOUND
 
 
 def test_crawl_requires_start_url_exit_usage():

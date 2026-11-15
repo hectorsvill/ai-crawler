@@ -71,6 +71,11 @@ Own SQLite DB at `data/crawler.db` (gitignored). Seeds: `radar/seeds.yaml`.
 .venv/bin/python main.py radar stats --json
 .venv/bin/python main.py radar topics --json
 
+# Every URL the run encountered (not only stored pages)
+.venv/bin/python main.py radar urls --run 3 --json
+.venv/bin/python main.py radar urls --run 3 --status skipped --json
+.venv/bin/python main.py radar urls --status not_fetched --domain bbc.com --limit 100 --json
+
 # Export (stdout by default; -o writes a file and prints a JSON receipt on stderr)
 .venv/bin/python main.py radar export --format jsonl --since 2026-11-12 > pages.jsonl
 .venv/bin/python main.py radar export --format json --topic ai-security -o exports/ai-security.json
@@ -79,7 +84,39 @@ Own SQLite DB at `data/crawler.db` (gitignored). Seeds: `radar/seeds.yaml`.
 
 `radar crawl --json` result: `{run_id, status: completed|partial|failed, db_path, elapsed_s,
 counters: {fetched, stored, failed, skipped, feed_only, inserted, updated, unchanged, duplicate_content},
-domains, errors: [{url, error}], skips: [{url, reason}]}`.
+domains, errors: [{url, error}], skips: [{url, reason}], urls_logged}`.
+`urls_logged` is the number of `run_urls` rows written for that run.
+
+`radar crawl --dry-run --json` includes `url_log` (`table`, `key`, `statuses`, `seed_urls`)
+and does not open the DB. A live run writes one `run_urls` row per URL it encounters.
+
+`radar urls --json` prints a JSON array (oldest discovery first). Filters: `--run`, `--status`,
+`--domain` (exact or subdomain), `--limit` (default 100), `--offset`. Unknown `--status` exits
+**2**. `--run` that is not in `runs` exits **4**. No matches exits **0** with `[]`.
+
+URL object: `{id, run_id, url, domain, source_seed, discovered_from, depth, status, reason,
+http_status, discovered_at, fetched_at}`. `discovered_from` is null for the seed itself.
+`fetched_at` is set only when a request was sent (including HTTP errors and transport
+failures). Page URLs are normalized the same way as `pages.url`.
+
+`status`:
+
+| status | meaning |
+|--------|---------|
+| `stored` | `pages` row written with a body |
+| `feed_only` | `pages` row written from feed metadata, no body |
+| `failed` | request failed and no `pages` row was written |
+| `skipped` | robots.txt disallow, long Crawl-delay with nothing to store, or non-HTML content-type |
+| `not_fetched` | seen and never requested |
+| `duplicate` | `pages` row written but text omitted (`duplicate_content`: same hash, other URL) |
+| `fetched` | seed feed document retrieved and parsed, not stored as a page |
+
+`not_fetched` reasons: `budget` (page cap), `max_items` (per-seed cap), `depth`, `link_cap`
+(per-page follow cap), `require_match`, `recent_days`, `no_title` (feed_only seed, empty title).
+A fetch failure or long Crawl-delay that still saves feed metadata is `feed_only`; `reason` /
+`http_status` keep the error (`HTTP 403`, `crawl-delay 100s`) and `runs.errors` still lists
+fetch failures. Nav, off-site, and asset links rejected by `is_article_link` are not logged.
+robots.txt itself is not logged.
 
 Page objects: `{id, url, canonical_url, domain, title, description, published_at, fetched_at,
 http_status, content_hash, source_seed, first_run_id, last_run_id, times_seen, tags[, text_md]}`.
@@ -99,9 +136,16 @@ runs(id, started_at, ended_at, status, params JSON, pages_fetched, pages_stored,
      pages_failed, pages_skipped, errors JSON)
 pages(id, url UNIQUE, canonical_url, domain, title, description, published_at, fetched_at,
       http_status, content_hash, text_md, source_seed, first_run_id, last_run_id, times_seen)
+run_urls(id, run_id, url, domain, source_seed, discovered_from, depth, status, reason,
+         http_status, discovered_at, fetched_at)  -- UNIQUE(run_id, url)
 tags(id, name UNIQUE)          page_tags(page_id, tag_id)  -- PK(page_id, tag_id)
 pages_fts  -- FTS5 over (title, text_md), kept in sync by triggers
 ```
+
+`pages` and `pages_fts` are unchanged. `run_urls` is added by an idempotent migration
+(`PRAGMA user_version` 2) the first time an older `data/crawler.db` is opened: new table
+and any missing columns only, no rewrite of existing page rows. Re-opening is a no-op.
+The same URL in a later run is a new row (the key is per run).
 
 Direct SQL is fine for reads: `sqlite3 data/crawler.db 'SELECT title, url FROM pages ORDER BY published_at DESC LIMIT 10'`.
 
