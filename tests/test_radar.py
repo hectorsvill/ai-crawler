@@ -500,6 +500,18 @@ def _row(db, url, run_id=None):
     return rows[0]
 
 
+def _no_row(db, url, run_id=None):
+    rows = [r for r in db.query_urls(run_id=run_id, limit=500) if r["url"] == url]
+    assert rows == [], (url, rows)
+
+
+def _reason_count(db, run_id, reason, status="not_fetched"):
+    return sum(
+        r["count"] for r in db.url_counts(run_id)["by_reason"]
+        if r["status"] == status and r["reason"] == reason
+    )
+
+
 class _RaisingSession(_FakeSession):
     def get(self, url, **kw):
         self.calls.append(url)
@@ -547,7 +559,7 @@ _DELAY_RSS = """<?xml version="1.0"?><rss version="2.0"><channel><title>t</title
 
 
 class TestUrlLog:
-    """Every encountered URL is a run_urls row. One test per status, no network."""
+    """URL log: a row for actionable outcomes; noisy not_fetched reasons are counted."""
 
     def test_stored_and_duplicate(self, tmp_path, monkeypatch):
         from radar.crawler import Seed
@@ -703,9 +715,10 @@ class TestUrlLog:
         assert row["discovered_from"] == "https://news.example.org/rss"
         page = db.get_page(url=row["url"])
         assert page["text_md"] is None and page["title"] == "Iran says it struck radar in Bahrain"
-        football = _row(db, "https://news.example.org/football")
-        assert football["status"] == "not_fetched" and football["reason"] == "require_match"
-        assert football["url"] not in _session.calls
+        _no_row(db, "https://news.example.org/football")
+        assert _reason_count(db, result["run_id"], "require_match") == 1
+        assert "https://news.example.org/football" not in _session.calls
+        assert db.get_page(url="https://news.example.org/football") is None
         feed = _row(db, "https://news.example.org/rss")
         assert feed["status"] == "fetched" and feed["reason"] == "feed" and feed["http_status"] == 200
         assert db.get_page(url=feed["url"]) is None
@@ -759,14 +772,16 @@ class TestUrlLog:
             recent_days=7, max_pages=10,
         )
         assert _row(db, "https://news.example.org/iran-one")["status"] == "stored"
-        capped = _row(db, "https://news.example.org/iran-two")
-        assert capped["status"] == "not_fetched" and capped["reason"] == "max_items"
-        assert capped["url"] not in session.calls
-        assert _row(db, "https://news.example.org/football")["reason"] == "require_match"
-        old = _row(db, "https://news.example.org/old-iran")
-        assert old["status"] == "not_fetched" and old["reason"] == "recent_days"
-        assert old["url"] not in session.calls
-        assert db.get_page(url=old["url"]) is None
+        _no_row(db, "https://news.example.org/iran-two")
+        assert _reason_count(db, result["run_id"], "max_items") == 1
+        assert "https://news.example.org/iran-two" not in session.calls
+        _no_row(db, "https://news.example.org/football")
+        assert _reason_count(db, result["run_id"], "require_match") == 1
+        _no_row(db, "https://news.example.org/old-iran")
+        assert _reason_count(db, result["run_id"], "recent_days") == 1
+        assert "https://news.example.org/old-iran" not in session.calls
+        assert db.get_page(url="https://news.example.org/old-iran") is None
+        assert result["urls_counted"] == 3
         db.close()
 
         hub = (
@@ -793,21 +808,15 @@ class TestUrlLog:
             [Seed(url="https://ex.com/news", max_items=3)],
             max_pages=20, max_depth=2,
         )
-        capped = [
-            r for r in db.query_urls(run_id=_result["run_id"], status="not_fetched", limit=20)
-            if r["reason"] == "link_cap"
-        ]
-        assert {r["url"] for r in capped} == {
-            "https://ex.com/news/2026/11/child-story-ccc",
-            "https://ex.com/news/2026/11/child-story-ddd",
-        }
-        for row in capped:
-            assert row["url"] not in session.calls
-            assert row["discovered_from"] == "https://ex.com/news/2026/11/hub-story-here"
-            assert row["depth"] == 2
-            assert db.get_page(url=row["url"]) is None
+        assert _reason_count(db, _result["run_id"], "link_cap") == 2
+        for url in ("https://ex.com/news/2026/11/child-story-ccc",
+                    "https://ex.com/news/2026/11/child-story-ddd"):
+            _no_row(db, url, _result["run_id"])
+            assert url not in session.calls
+            assert db.get_page(url=url) is None
         assert "https://ex.com/news/2026/11/child-story-aaa" in session.calls
         assert "https://ex.com/news/2026/11/child-story-bbb" in session.calls
+        assert _result["urls_counted"] == 2
 
     def test_second_run_appends_rows_for_the_same_url(self, tmp_path, monkeypatch):
         from radar.crawler import Seed
@@ -893,6 +902,130 @@ class TestUrlCounts:
         assert c["by_status"]["fetched"] == 1
         reasons = {r["reason"] for r in c["by_reason"] if r["status"] == "not_fetched"}
         assert {"recent_days", "require_match"} <= reasons
+        counted = {r["reason"] for r in c["by_reason"]
+                   if r["status"] == "not_fetched" and r.get("aggregated")}
+        assert {"recent_days", "require_match"} <= counted
         assert c["reconciliation"]["pages_failed"] == {"run": 1, "url_log": 1, "match": True}
         assert c["total"] == sum(c["by_status"].values())
+        assert c["total"] == c["rows"] + c["aggregated"]
+        assert c["aggregated"] >= 2
         assert {"status": "feed_only", "reason": "HTTP 403", "count": 1} in c["by_reason"]
+        assert result["urls_logged"] == c["rows"]
+        assert result["urls_counted"] == c["aggregated"]
+
+
+class TestUrlLogCountsAndPrune:
+    def test_migrate_v3_adds_counts_table(self, tmp_path):
+        import sqlite3
+        from radar.db import SCHEMA, SCHEMA_VERSION
+        path = tmp_path / "v2.db"
+        conn = sqlite3.connect(path)
+        conn.executescript(SCHEMA)
+        conn.executescript(
+            """CREATE TABLE run_urls (
+                   id INTEGER PRIMARY KEY AUTOINCREMENT,
+                   run_id INTEGER NOT NULL,
+                   url TEXT NOT NULL,
+                   domain TEXT NOT NULL,
+                   status TEXT NOT NULL,
+                   reason TEXT,
+                   UNIQUE (run_id, url)
+               )"""
+        )
+        conn.execute("PRAGMA user_version = 2")
+        conn.execute(
+            "INSERT INTO runs (started_at, params) VALUES ('2026-11-01T00:00:00+00:00', '{}')"
+        )
+        conn.execute(
+            "INSERT INTO run_urls (run_id, url, domain, status, reason) "
+            "VALUES (1, 'https://a.com/old', 'a.com', 'not_fetched', 'recent_days')"
+        )
+        conn.commit()
+        conn.close()
+        with RadarDB(path) as db:
+            assert db.conn.execute("PRAGMA user_version").fetchone()[0] == SCHEMA_VERSION
+            tables = {r[0] for r in db.conn.execute(
+                "SELECT name FROM sqlite_master WHERE type='table'")}
+            assert "run_url_counts" in tables
+            # Historical rows are kept; prune, not migrate, removes them.
+            assert db.count_urls(1) == 1
+            db.add_url_counts(1, {("not_fetched", "max_items"): 4})
+            c = db.url_counts(1)
+            assert c["rows"] == 1 and c["aggregated"] == 4
+            assert c["by_status"]["not_fetched"] == 5
+            assert c["total"] == 5
+
+    def test_prune_url_log_keeps_runs_and_counts(self, tmp_path):
+        from datetime import datetime, timedelta, timezone
+        path = tmp_path / "p.db"
+        with RadarDB(path) as db:
+            old = db.start_run({"who": "old"})
+            new = db.start_run({"who": "new"})
+            cutoff = (datetime.now(timezone.utc) - timedelta(days=40)).replace(
+                microsecond=0).isoformat()
+            db.conn.execute("UPDATE runs SET started_at = ? WHERE id = ?", (cutoff, old))
+            db.conn.commit()
+            db.log_url({"run_id": old, "url": "https://a.com/old", "domain": "a.com",
+                        "status": "stored", "http_status": 200})
+            db.log_url({"run_id": new, "url": "https://a.com/new", "domain": "a.com",
+                        "status": "stored", "http_status": 200})
+            db.add_url_counts(old, {("not_fetched", "recent_days"): 99})
+            db.finish_run(old, "completed", {"fetched": 1, "stored": 1}, [])
+            db.finish_run(new, "completed", {"fetched": 1, "stored": 1}, [])
+            preview = db.prune_url_log(30, dry_run=True)
+            assert preview["dry_run"] and preview["rows"] == 1 and old in preview["runs"]
+            assert db.count_urls(old) == 1
+            result = db.prune_url_log(30)
+            assert result["rows"] == 1 and not result["dry_run"]
+            assert db.count_urls(old) == 0
+            assert db.count_urls(new) == 1
+            assert db.get_run(old)["pages_stored"] == 1
+            c = db.url_counts(old)
+            assert c["by_status"]["not_fetched"] == 99
+            assert c["aggregated"] == 99 and c["rows"] == 0
+            assert db.prune_url_log(0)["disabled"] is True
+            assert db.count_urls(new) == 1
+
+    def test_crawl_prunes_old_rows_before_run(self, tmp_path, monkeypatch):
+        from datetime import datetime, timedelta, timezone
+        from radar.crawler import Seed
+        path = tmp_path / "c.db"
+        with RadarDB(path) as db:
+            old = db.start_run({})
+            started = (datetime.now(timezone.utc) - timedelta(days=40)).replace(
+                microsecond=0).isoformat()
+            db.conn.execute("UPDATE runs SET started_at = ? WHERE id = ?", (started, old))
+            db.conn.commit()
+            db.log_url({"run_id": old, "url": "https://stale.com/x", "domain": "stale.com",
+                        "status": "stored"})
+            db.add_url_counts(old, {("not_fetched", "recent_days"): 12})
+            db.finish_run(old, "completed", {"fetched": 1, "stored": 1}, [])
+        routes = {
+            "https://ex.com/robots.txt": (404, "", "text/plain"),
+            "https://ex.com/news": (
+                200, "<html><head><title>News</title></head><body>Hi</body></html>", "text/html"),
+        }
+        result, db, _session = _run_crawl(
+            tmp_path, monkeypatch, routes, [Seed(url="https://ex.com/news")],
+            max_pages=2, keep_url_log_days=30,
+        )
+        assert db.count_urls(old) == 0
+        assert db.url_counts(old)["aggregated"] == 12
+        assert result["url_log_pruned"]["rows"] == 1
+        assert result["urls_logged"] >= 1
+        # 0 disables pruning of a second stale run
+        with RadarDB(path) as db2:
+            stale = db2.start_run({})
+            started = (datetime.now(timezone.utc) - timedelta(days=40)).replace(
+                microsecond=0).isoformat()
+            db2.conn.execute("UPDATE runs SET started_at = ? WHERE id = ?", (started, stale))
+            db2.conn.commit()
+            db2.log_url({"run_id": stale, "url": "https://stale.com/y", "domain": "stale.com",
+                         "status": "failed", "reason": "HTTP 500"})
+            db2.finish_run(stale, "failed", {"failed": 1}, [])
+        result, db, _session = _run_crawl(
+            tmp_path, monkeypatch, routes, [Seed(url="https://ex.com/news")],
+            max_pages=2, keep_url_log_days=0,
+        )
+        assert db.count_urls(stale) == 1
+        assert result["url_log_pruned"]["rows"] == 0

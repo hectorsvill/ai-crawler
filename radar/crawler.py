@@ -8,8 +8,9 @@ Pipeline per run:
   3. Fetch candidates breadth-first up to --max-depth / --max-pages, extract
      title, canonical URL, published date, and Markdown text, tag by topic, and
      upsert into the radar DB.
-  4. Write every encountered URL (seed, fetch, skip, failure, unfetched
-     candidate) to ``run_urls``, keyed by run id + URL. ``pages`` is unchanged.
+  4. Write actionable URL outcomes to ``run_urls`` (stored, skipped, failed,
+     duplicate, feed_only, and not_fetched for budget/depth). Other not_fetched
+     reasons are counted in ``run_url_counts``. ``pages`` is unchanged.
 
 Politeness: honest User-Agent, robots.txt (RFC 9309: 5xx/unreachable => disallow),
 Crawl-delay honoured, per-domain minimum delay, small global concurrency,
@@ -32,7 +33,7 @@ from urllib.robotparser import RobotFileParser
 
 import yaml
 
-from radar.db import URL_STATUSES, RadarDB, utcnow
+from radar.db import DEFAULT_KEEP_URL_LOG_DAYS, ROW_NOT_FETCHED_REASONS, URL_STATUSES, RadarDB, utcnow
 from radar.extract import (
     content_hash, domain_of, extract_metadata, is_article_link, normalize_url, parse_feed,
 )
@@ -62,6 +63,7 @@ class Seed:
 @dataclass
 class CrawlParams:
     max_pages: int = 200
+    keep_url_log_days: int = DEFAULT_KEEP_URL_LOG_DAYS
     max_depth: int = 1
     concurrency: int = 2
     delay: float = 2.0              # min seconds between requests to the same domain
@@ -165,6 +167,7 @@ def plan(seeds: list[Seed], params: CrawlParams, db_path: str) -> dict[str, Any]
             "max_pages": params.max_pages, "max_depth": params.max_depth,
             "concurrency": params.concurrency, "per_domain_delay_s": params.delay,
             "recent_days": params.recent_days,
+            "keep_url_log_days": params.keep_url_log_days,
         },
         "seeds": [
             {"url": s.url, "kind": s.kind, "topics": s.topics, "max_items": s.max_items,
@@ -178,12 +181,18 @@ def plan(seeds: list[Seed], params: CrawlParams, db_path: str) -> dict[str, Any]
         # A live run writes one row per URL it encounters. Dry-run does not open the DB.
         "url_log": {
             "table": "run_urls",
+            "counts_table": "run_url_counts",
             "key": ["run_id", "url"],
             "statuses": list(URL_STATUSES),
+            "row_not_fetched_reasons": sorted(ROW_NOT_FETCHED_REASONS),
+            "keep_url_log_days": params.keep_url_log_days,
             "seed_urls": [s.url for s in seeds],
             "note": (
-                "Every seed, fetch, skip, failure, and discovered URL that is not "
-                "fetched is inserted into run_urls. Query with `radar urls`."
+                "run_urls stores stored/feed_only/failed/skipped/duplicate/fetched "
+                "and not_fetched only for budget and depth. Other not_fetched "
+                "reasons are counted in run_url_counts. Query with `radar urls`. "
+                "A live run also prunes run_urls older than keep_url_log_days "
+                "(0 disables). Dry-run does not open the DB."
             ),
         },
     }
@@ -192,6 +201,8 @@ def plan(seeds: list[Seed], params: CrawlParams, db_path: str) -> dict[str, Any]
 class RadarCrawler:
     def __init__(self, db: RadarDB, params: CrawlParams) -> None:
         self.db, self.p = db, params
+        self._agg: dict[str, str] = {}   # url -> not_fetched reason (counted, no row)
+        self._logged: set[str] = set()  # urls with a run_urls row this run
         self.counters = {"fetched": 0, "stored": 0, "failed": 0, "skipped": 0, "feed_only": 0,
                          "inserted": 0, "updated": 0, "unchanged": 0, "duplicate_content": 0}
         self._http_fail: dict[str, int] = {}
@@ -227,9 +238,22 @@ class RadarCrawler:
              discovered_from: str | None = None, reason: str | None = None,
              http_status: int | None = None, fetched: bool = False,
              overwrite: bool = True) -> None:
-        """Append or upgrade one ``run_urls`` row. Does not touch politeness state."""
+        """Append or upgrade one ``run_urls`` row. Does not touch politeness state.
+
+        not_fetched with a reason outside ``ROW_NOT_FETCHED_REASONS`` is only
+        counted (flushed to ``run_url_counts`` when the run ends). A later real
+        outcome for the same URL replaces the count, as it would replace a row.
+        """
         if not url:
             return
+        if status == "not_fetched" and reason not in ROW_NOT_FETCHED_REASONS:
+            if url not in self._logged and url not in self._agg:
+                self._agg[url] = reason or "unknown"
+            return
+        if not overwrite and url in self._agg:
+            return
+        self._agg.pop(url, None)
+        self._logged.add(url)
         now = utcnow()
         self.db.log_url({
             "run_id": run_id, "url": url, "domain": domain_of(url),
@@ -466,6 +490,7 @@ class RadarCrawler:
 
     async def run(self, seeds: list[Seed], run_params: dict) -> dict[str, Any]:
         import aiohttp
+        pruned = self.db.prune_url_log(self.p.keep_url_log_days)
         run_id = self.db.start_run(run_params)
         started = time.monotonic()
         status = "failed"
@@ -481,6 +506,8 @@ class RadarCrawler:
             if status == "completed" and self.counters["failed"]:
                 status = "partial"
         finally:
+            from collections import Counter
+            self.db.add_url_counts(run_id, Counter(("not_fetched", r) for r in self._agg.values()))
             self.db.finish_run(run_id, status, self.counters, self.errors)
         return {
             "run_id": run_id, "status": status, "db_path": self.db.path,
@@ -488,4 +515,6 @@ class RadarCrawler:
             "counters": self.counters, "domains": sorted(self.domains),
             "errors": self.errors, "skips": self.skips,
             "urls_logged": self.db.count_urls(run_id),
+            "urls_counted": len(self._agg),
+            "url_log_pruned": {k: pruned[k] for k in ("keep_days", "cutoff", "rows")},
         }

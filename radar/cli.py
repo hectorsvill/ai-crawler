@@ -55,6 +55,10 @@ def crawl_cmd(
     concurrency: int = typer.Option(2, "--concurrency", min=1, max=8, help="Global concurrent fetches."),
     delay: float = typer.Option(2.0, "--delay", min=0.5, help="Min seconds between requests per domain."),
     recent_days: int = typer.Option(7, "--recent-days", help="Skip feed items older than N days (0 = keep all)."),
+    keep_url_log_days: int = typer.Option(
+        30, "--keep-url-log-days", min=0,
+        help="Delete run_urls rows of runs started more than N days ago at crawl start (0 = disable).",
+    ),
     user_agent: Optional[str] = typer.Option(None, "--user-agent", envvar="CRAWLER_RADAR_UA", help="Override UA."),
     db: Optional[str] = DBOpt,
     dry_run: bool = typer.Option(False, "--dry-run", help="Print the plan; no network, no DB writes."),
@@ -85,7 +89,7 @@ def crawl_cmd(
     params = CrawlParams(
         max_pages=max_pages, max_depth=max_depth, concurrency=concurrency, delay=delay,
         recent_days=recent_days or None, user_agent=user_agent or DEFAULT_UA,
-        topics=list(topic) or None,
+        topics=list(topic) or None, keep_url_log_days=keep_url_log_days,
     )
     db_path = db or DEFAULT_DB_PATH
     if dry_run:
@@ -106,6 +110,7 @@ def crawl_cmd(
         f"run {result['run_id']} {result['status']}: fetched={c['fetched']} stored={c['stored']} "
         f"(new={c['inserted']} updated={c['updated']} unchanged={c['unchanged']}) "
         f"failed={c['failed']} skipped={c['skipped']} domains={len(result['domains'])} "
+        f"urls_logged={result['urls_logged']} urls_counted={result['urls_counted']} "
         f"in {result['elapsed_s']}s → {result['db_path']}"))
     if result["status"] == "failed":
         raise typer.Exit(rc.ERROR)
@@ -153,10 +158,21 @@ def urls_cmd(
         False, "--counts",
         help="With --run: per-status/reason counts reconciled with the run's counters.",
     ),
+    prune: bool = typer.Option(
+        False, "--prune",
+        help="Delete run_urls rows older than --keep-url-log-days (runs/counts kept).",
+    ),
+    keep_url_log_days: int = typer.Option(
+        30, "--keep-url-log-days", min=0,
+        help="With --prune (or crawl): retention in days. 0 disables pruning.",
+    ),
+    dry_run: bool = typer.Option(
+        False, "--dry-run", help="With --prune: report what would be deleted, do not write.",
+    ),
     db: Optional[str] = DBOpt,
     as_json: bool = JsonOpt,
 ) -> None:
-    """List every URL a run encountered (not only stored pages)."""
+    """List every URL a run logged (not only stored pages), or prune old log rows."""
     from radar.db import URL_STATUSES
 
     if status is not None and status not in URL_STATUSES:
@@ -164,7 +180,24 @@ def urls_cmd(
             f"unknown status {status!r}. Expected: {', '.join(URL_STATUSES)}",
             rc.USAGE, as_json,
         )
+    if dry_run and not prune:
+        fail("--dry-run is only valid with --prune", rc.USAGE, as_json)
+    if prune and (counts or status is not None or run_id is not None or domain):
+        fail("--prune cannot be combined with --run, --status, --domain, or --counts",
+             rc.USAGE, as_json)
     with _db(db) as store:
+        if prune:
+            summary = store.prune_url_log(keep_url_log_days, dry_run=dry_run)
+            verb = "would delete" if dry_run else "deleted"
+            if summary.get("disabled"):
+                human = f"pruning disabled (--keep-url-log-days {keep_url_log_days})"
+            else:
+                human = (
+                    f"{verb} {summary['rows']} run_urls rows from "
+                    f"{len(summary['runs'])} runs (cutoff {summary['cutoff']})"
+                )
+            emit(summary, as_json, human=human)
+            return
         if run_id is not None and store.get_run(run_id) is None:
             fail(f"run {run_id} not found", rc.NOT_FOUND, as_json)
         if counts:
@@ -172,7 +205,8 @@ def urls_cmd(
                 fail("--counts needs --run N", rc.USAGE, as_json)
             summary = store.url_counts(run_id)
             emit(summary, as_json, human=(
-                f"run {run_id}: {summary['total']} urls  "
+                f"run {run_id}: {summary['total']} urls "
+                f"({summary['rows']} rows, {summary['aggregated']} counted)  "
                 + "  ".join(f"{k}={v}" for k, v in summary["by_status"].items() if v) + "\n"
                 + "\n".join(f"  {k:<14} run={r['run']} url_log={r['url_log']}"
                              f"{'' if r['match'] else '  MISMATCH'}"

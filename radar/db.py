@@ -5,7 +5,8 @@ Default path: data/crawler.db (override with --db or CRAWLER_RADAR_DB).
 Tables
   runs       one row per crawl run (params, counters, status)
   pages      one row per stored URL (idempotent upsert on url); content_hash for dedupe
-  run_urls   one row per URL encountered in a run (stored, skipped, failed, not fetched)
+  run_urls         per-URL log for a run (actionable outcomes only for not_fetched)
+  run_url_counts   per-run aggregate counts for dropped not_fetched reasons
   tags       topic vocabulary
   page_tags  many-to-many pages<->tags
   pages_fts  FTS5 index over title + text (if the SQLite build supports FTS5)
@@ -13,6 +14,10 @@ Tables
 Schema version (PRAGMA user_version):
   1  original tables (runs, pages, tags, page_tags, pages_fts)
   2  adds run_urls. Opening any older file applies this additively.
+  3  adds run_url_counts: per-run aggregate counts for not_fetched reasons that
+     are not worth a row each (recent_days, max_items, require_match, link_cap,
+     no_title). run_urls rows are pruned after --keep-url-log-days (default 30);
+     runs and run_url_counts are never pruned.
 """
 
 from __future__ import annotations
@@ -29,7 +34,14 @@ DEFAULT_DB_PATH = os.environ.get(
 )
 
 # Bump when _migrate applies a new additive change. Existing files upgrade on open.
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
+
+# not_fetched reasons that keep a per-URL row (actionable: raise --max-pages or
+# --max-depth). Every other not_fetched reason is only counted in run_url_counts.
+ROW_NOT_FETCHED_REASONS = frozenset({"budget", "depth"})
+
+# Default retention for run_urls rows (days). 0 disables pruning.
+DEFAULT_KEEP_URL_LOG_DAYS = 30
 
 # run_urls.status. ``fetched`` is a seed document (RSS/Atom) that was retrieved and
 # parsed but is not itself a pages row. A fetch that later saved feed metadata is
@@ -112,6 +124,14 @@ CREATE TABLE IF NOT EXISTS run_urls (
 );
 CREATE INDEX IF NOT EXISTS ix_run_urls_run_status ON run_urls(run_id, status);
 CREATE INDEX IF NOT EXISTS ix_run_urls_domain    ON run_urls(domain);
+
+CREATE TABLE IF NOT EXISTS run_url_counts (
+    run_id  INTEGER NOT NULL REFERENCES runs(id) ON DELETE CASCADE,
+    status  TEXT NOT NULL,
+    reason  TEXT NOT NULL,
+    n       INTEGER NOT NULL DEFAULT 0,
+    PRIMARY KEY (run_id, status, reason)
+);
 """
 
 # Columns added after the table first shipped. ALTER is a no-op when present.
@@ -275,6 +295,44 @@ class RadarDB:
             )
         self.conn.commit()
 
+    def add_url_counts(self, run_id: int, counts: dict[tuple[str, str], int]) -> None:
+        """Add aggregate (status, reason) -> n counts for a run (accumulates)."""
+        for (status, reason), n in counts.items():
+            if status not in URL_STATUSES:
+                raise ValueError(f"unknown url status: {status}")
+            if not n:
+                continue
+            self.conn.execute(
+                """INSERT INTO run_url_counts (run_id, status, reason, n) VALUES (?,?,?,?)
+                   ON CONFLICT(run_id, status, reason) DO UPDATE SET n = n + excluded.n""",
+                (run_id, status, reason, int(n)),
+            )
+        self.conn.commit()
+
+    def prune_url_log(self, keep_days: int, *, dry_run: bool = False) -> dict[str, Any]:
+        """Delete run_urls rows of runs started more than ``keep_days`` ago.
+
+        ``runs`` counters and ``run_url_counts`` are never touched. ``keep_days`` <= 0
+        is a no-op. Returns {keep_days, cutoff, runs, rows, dry_run}.
+        """
+        from datetime import timedelta
+        if keep_days <= 0:
+            return {"keep_days": keep_days, "cutoff": None, "runs": [], "rows": 0,
+                    "dry_run": dry_run, "disabled": True}
+        cutoff = (datetime.now(timezone.utc) - timedelta(days=keep_days)).replace(
+            microsecond=0).isoformat()
+        sel = ("SELECT u.run_id, COUNT(*) FROM run_urls u JOIN runs r ON r.id = u.run_id "
+               "WHERE r.started_at < ? GROUP BY u.run_id ORDER BY u.run_id")
+        per_run = [(int(a), int(b)) for a, b in self.conn.execute(sel, (cutoff,))]
+        rows = sum(n for _, n in per_run)
+        if per_run and not dry_run:
+            self.conn.execute(
+                "DELETE FROM run_urls WHERE run_id IN "
+                "(SELECT id FROM runs WHERE started_at < ?)", (cutoff,))
+            self.conn.commit()
+        return {"keep_days": keep_days, "cutoff": cutoff, "runs": [r for r, _ in per_run],
+                "rows": rows, "dry_run": dry_run, "disabled": False}
+
     def query_urls(
         self,
         run_id: int | None = None,
@@ -350,7 +408,15 @@ class RadarDB:
         counters = dict(run) if run else {}
         recon = {k: {"run": counters.get(k), "url_log": v, "match": counters.get(k) == v}
                  for k, v in derived.items()}
-        return {"run_id": run_id, "total": sum(by_status.values()),
+        rows_total = sum(by_status.values())
+        aggregated = [dict(r) for r in c.execute(
+            "SELECT status, reason, n AS count FROM run_url_counts WHERE run_id = ? "
+            "ORDER BY status, n DESC", (run_id,))]
+        for a in aggregated:
+            by_status[a["status"]] = by_status.get(a["status"], 0) + a["count"]
+            by_reason.append({**a, "aggregated": True})
+        return {"run_id": run_id, "total": sum(by_status.values()), "rows": rows_total,
+                "aggregated": sum(a["count"] for a in aggregated),
                 "by_status": {k: by_status.get(k, 0) for k in URL_STATUSES},
                 "by_reason": by_reason, "reconciliation": recon,
                 "ok": all(r["match"] for r in recon.values())}
@@ -500,6 +566,8 @@ class RadarDB:
             "domains": c.execute("SELECT COUNT(DISTINCT domain) FROM pages").fetchone()[0],
             "runs": c.execute("SELECT COUNT(*) FROM runs").fetchone()[0],
             "url_log": c.execute("SELECT COUNT(*) FROM run_urls").fetchone()[0],
+            "url_log_aggregated": c.execute(
+                "SELECT COALESCE(SUM(n), 0) FROM run_url_counts").fetchone()[0],
             "tags": self.tag_counts(),
             "by_domain": [dict(r) for r in c.execute(
                 "SELECT domain, COUNT(*) AS pages FROM pages GROUP BY domain ORDER BY pages DESC"

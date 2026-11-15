@@ -178,3 +178,43 @@ def test_radar_urls_counts_json_and_exit_codes(tmp_path):
     assert r.exit_code == 2 and json.loads(r.stdout)["exit_code"] == 2
     r = runner.invoke(app, ["radar", "urls", "--db", db, "--json", "--counts", "--run", "999"])
     assert r.exit_code == 4
+
+
+
+def test_radar_urls_prune_dry_run_and_exit_codes(tmp_path):
+    from datetime import datetime, timedelta, timezone
+    from typer.testing import CliRunner
+    from main import app
+    from radar.db import RadarDB
+    db = str(tmp_path / "r.db")
+    store = RadarDB(db)
+    run = store.start_run({})
+    started = (datetime.now(timezone.utc) - timedelta(days=40)).replace(
+        microsecond=0).isoformat()
+    store.conn.execute("UPDATE runs SET started_at = ? WHERE id = ?", (started, run))
+    store.conn.commit()
+    store.log_url({"run_id": run, "url": "https://a.com/x", "domain": "a.com",
+                   "status": "stored", "http_status": 200})
+    store.add_url_counts(run, {("not_fetched", "recent_days"): 7})
+    store.finish_run(run, "completed", {"fetched": 1, "stored": 1}, [])
+    store.close()
+    runner = CliRunner()
+    r = runner.invoke(app, ["radar", "urls", "--db", db, "--json", "--prune", "--dry-run"])
+    assert r.exit_code == 0, r.output
+    d = json.loads(r.stdout)
+    assert d["dry_run"] and d["rows"] == 1 and run in d["runs"]
+    store = RadarDB(db)
+    assert store.count_urls(run) == 1
+    store.close()
+    r = runner.invoke(app, ["radar", "urls", "--db", db, "--json", "--prune"])
+    assert r.exit_code == 0, r.output
+    d = json.loads(r.stdout)
+    assert not d["dry_run"] and d["rows"] == 1
+    store = RadarDB(db)
+    assert store.count_urls(run) == 0
+    assert store.url_counts(run)["aggregated"] == 7
+    store.close()
+    r = runner.invoke(app, ["radar", "urls", "--db", db, "--json", "--dry-run"])
+    assert r.exit_code == 2
+    r = runner.invoke(app, ["radar", "urls", "--db", db, "--json", "--prune", "--counts", "--run", "1"])
+    assert r.exit_code == 2
